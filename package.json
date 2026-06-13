@@ -14,7 +14,9 @@
     "directories": {
       "output": "dist"
     },
+    "afterPack": "scripts/afterPack.js",
     "win": {
+      "signAndEditExecutable": false,
       "target": [
         {
           "target": "nsis",
