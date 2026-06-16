@@ -13,6 +13,12 @@
 
 ## Cài đặt và chạy
 
+### Cách 1: Dành cho người sử dụng phổ thông
+
+1. Tải file [Messeger.zip](https://github.com/Baor-05/Messenger-reup/releases/tag/Messeger) trong phần Releases.
+2. Giải nén file `Messeger.zip`.
+3. Mở file `Messeger.exe`.
+
 Yêu cầu [Node.js LTS](https://nodejs.org/en).
 
 ```bash
