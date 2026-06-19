@@ -275,7 +275,7 @@ document.getElementById('modal-logout').onclick = () => {
   editingProfile.avatar = null;
   saveProfiles();
 
-  ipcRenderer.send('logout-profile', { id: editingProfile.id, partition: editingProfile.partition });
+  ipcRenderer.send('logout-profile', { id: editingProfile.id, name: editingProfile.name, partition: editingProfile.partition });
 };
 
 // Nhận kết quả logout

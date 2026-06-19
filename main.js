@@ -18,6 +18,7 @@ const {
   nativeImage,
   nativeTheme,
   dialog,
+  Notification,
 } = require('electron');
 const { autoUpdater } = require('electron-updater');
 const path = require('path');
@@ -94,6 +95,8 @@ let tray = null;
 let settings = loadSettings();
 let isQuitting = false;
 let unreadCount = 0;
+let profileUnreadCounts = {}; // { profileId: count }
+let profileNames = {}; // { profileId: displayName }
 
 let browserViews = {}; // { profileId: BrowserView }
 let activeProfileId = null;
@@ -175,6 +178,42 @@ function updateTrayMenu() {
     { label: '❌ Thoát hoàn toàn', click: () => { isQuitting = true; app.quit(); } },
   ]);
   tray.setContextMenu(contextMenu);
+}
+
+function restoreMainWindow() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  if (mainWindow.isMinimized()) mainWindow.restore();
+  mainWindow.show();
+  mainWindow.focus();
+}
+
+function shouldNotifyUser() {
+  if (!mainWindow || mainWindow.isDestroyed()) return false;
+  return !mainWindow.isVisible() || mainWindow.isMinimized() || !mainWindow.isFocused();
+}
+
+function showMessageNotification(profileId, addedCount) {
+  if (!shouldNotifyUser() || !Notification.isSupported()) return;
+
+  const profileName = profileNames[profileId] || 'Messenger';
+  const countText = addedCount > 1 ? `${addedCount} tin nhắn mới` : 'Có tin nhắn mới';
+  const notification = new Notification({
+    title: profileName,
+    body: countText,
+    icon: path.join(__dirname, 'icon.png'),
+    silent: false,
+  });
+
+  notification.on('click', () => {
+    restoreMainWindow();
+    if (profileId && browserViews[profileId]) {
+      activeProfileId = profileId;
+      mainWindow.setBrowserView(browserViews[profileId]);
+      updateBrowserViewBounds();
+    }
+  });
+
+  notification.show();
 }
 
 function toggleBlockSeen(enable) {
@@ -439,40 +478,13 @@ function setupWebContents(contents, profileId, partition, options = {}) {
       clearInterval(avatarInterval);
       return;
     }
-    const avatarScript = `
-      (function() {
-        let nav = document.querySelector('div[role="navigation"]');
-        if (nav) {
-          let images = nav.querySelectorAll('svg image');
-          for (let img of images) {
-            let href = img.getAttribute('xlink:href') || img.getAttribute('href');
-            if (href && (href.includes('scontent') || href.includes('fbcdn'))) return href;
-          }
-        }
-        let images = document.querySelectorAll('svg image');
-        for (let img of images) {
-          let href = img.getAttribute('xlink:href') || img.getAttribute('href');
-          if (href && (href.includes('scontent') || href.includes('fbcdn'))) return href;
-        }
-        let imgs = document.querySelectorAll('img');
-        for (let img of imgs) {
-          if (img.src && (img.src.includes('scontent') || img.src.includes('fbcdn')) && img.width > 20 && img.width < 100) return img.src;
-        }
-        return null;
-      })();
-    `;
     try {
-      const avatarUrl = await contents.executeJavaScript(avatarScript);
-      if (avatarUrl && mainWindow && profileId) {
-        mainWindow.webContents.send('update-profile-avatar', { id: profileId, avatarUrl });
-      } else {
-        const cookies = await contents.session.cookies.get({ name: 'c_user' });
-        if (cookies && cookies.length > 0) {
-          const uid = cookies[0].value;
-          const fbAvatar = `https://graph.facebook.com/${uid}/picture?width=150&height=150`;
-          if (mainWindow && profileId) {
-            mainWindow.webContents.send('update-profile-avatar', { id: profileId, avatarUrl: fbAvatar });
-          }
+      const cookies = await contents.session.cookies.get({ name: 'c_user' });
+      if (cookies && cookies.length > 0) {
+        const uid = cookies[0].value;
+        const fbAvatar = `https://graph.facebook.com/${uid}/picture?width=150&height=150`;
+        if (mainWindow && profileId) {
+          mainWindow.webContents.send('update-profile-avatar', { id: profileId, avatarUrl: fbAvatar });
         }
       }
     } catch(e) {}
@@ -499,6 +511,11 @@ function setupWebContents(contents, profileId, partition, options = {}) {
           return total;
         })();
       `);
+      const previousCount = profileUnreadCounts[profileId];
+      if (typeof previousCount === 'number' && count > previousCount) {
+        showMessageNotification(profileId, count - previousCount);
+      }
+      profileUnreadCounts[profileId] = count || 0;
       if (mainWindow && !mainWindow.isDestroyed() && profileId) {
         mainWindow.webContents.send('update-profile-badge', { id: profileId, count: count || 0 });
       }
@@ -640,6 +657,7 @@ function createWindow() {
   // IPC
   ipcMain.on('switch-profile', (event, profile) => {
     activeProfileId = profile.id;
+    profileNames[profile.id] = profile.name || 'Messenger';
     if (!browserViews[profile.id]) {
       const view = new BrowserView({
         webPreferences: {
@@ -660,6 +678,7 @@ function createWindow() {
   // ── Đăng xuất / Xóa session cho 1 profile ──
   ipcMain.on('logout-profile', async (event, profileData) => {
     const { id, partition } = profileData;
+    if (profileData.name) profileNames[id] = profileData.name;
     try {
       // 1. Destroy BrowserView nếu đang tồn tại
       if (browserViews[id]) {
@@ -729,6 +748,8 @@ function createWindow() {
       browserViews[id].webContents.destroy();
       delete browserViews[id];
     }
+    delete profileUnreadCounts[id];
+    delete profileNames[id];
   });
 
   ipcMain.on('update-badge', (event, count) => {
