@@ -186,7 +186,6 @@ function shouldBlockMessengerRequest(url, payload, config = {}) {
       '"typing_indicator"',
       '"is_typing":',
       '\\"is_typing\\":',
-      'send_typing_indicators',
     ];
 
     if (
@@ -198,6 +197,110 @@ function shouldBlockMessengerRequest(url, payload, config = {}) {
   }
 
   return false;
+}
+
+function shouldBlockWorkerMessage(message, config) {
+  if (!config.blockTyping) return false;
+  const text = payloadToText(message).toLowerCase();
+
+  const isTyping = text.includes('typing') || text.includes('is_typing');
+  if (!isTyping) return false;
+
+  const isRealMessage = text.includes('send_message')
+    || text.includes('sendmessage')
+    || text.includes('body')
+    || text.includes('message_text')
+    || text.includes('offline_threading_id');
+
+  return !isRealMessage;
+}
+
+function shouldBlockMessengerWebSocketSend(url, payload, config = {}) {
+  if (!config.blockTyping) return false;
+
+  const requestUrl = String(url || '').toLowerCase();
+  if (!requestUrl.startsWith('wss://') || !requestUrl.includes('gateway.facebook.com/ws/')) {
+    return false;
+  }
+
+  const body = payloadToText(payload).toLowerCase();
+  const isTypingFrame = body.includes('"is_typing":')
+    || body.includes('\\"is_typing\\":')
+    || body.includes('lstypingindicator')
+    || body.includes('mawsendtypingindicator');
+
+  if (!isTypingFrame) return false;
+
+  const hasMessageOrStreamWork = [
+    'send_message',
+    'sendmessage',
+    'send_message_acked',
+    'offline_threading_id',
+    'webstreamackmanager',
+    'webstreamgroup',
+    'last_read_watermark_ts',
+    'lsthreadmarkread',
+    'mawthreadmarkread',
+  ].some((pattern) => body.includes(pattern));
+
+  return !hasMessageOrStreamWork;
+}
+
+function sanitizeMessengerWebSocketPayload(url, payload, config = {}) {
+  if (!config.blockTyping) return payload;
+
+  const requestUrl = String(url || '').toLowerCase();
+  if (!requestUrl.startsWith('wss://') || !requestUrl.includes('gateway.facebook.com/ws/')) {
+    return payload;
+  }
+
+  const replaceTypingText = (text) => text
+    .replace(/(("is_typing"\s*:\s*))1/gi, '$10')
+    .replace(/((\\"is_typing\\"\s*:\s*))1/gi, '$10')
+    .replace(/(("is_typing"\s*:\s*))true/gi, '$1false')
+    .replace(/((\\"is_typing\\"\s*:\s*))true/gi, '$1false');
+
+  if (typeof payload === 'string') {
+    return replaceTypingText(payload);
+  }
+
+  let bytes = null;
+  let returnArrayBuffer = false;
+  if (typeof ArrayBuffer !== 'undefined') {
+    if (payload instanceof ArrayBuffer) {
+      bytes = new Uint8Array(payload);
+      returnArrayBuffer = true;
+    } else if (ArrayBuffer.isView(payload)) {
+      bytes = new Uint8Array(payload.buffer, payload.byteOffset, payload.byteLength);
+    }
+  }
+
+  if (!bytes) return payload;
+
+  let ascii = '';
+  for (let i = 0; i < bytes.length; i += 1) {
+    const b = bytes[i];
+    ascii += b >= 32 && b <= 126 ? String.fromCharCode(b) : ' ';
+  }
+
+  const nextBytes = new Uint8Array(bytes);
+  let changed = false;
+  const patterns = [
+    /"is_typing"\s*:\s*1/gi,
+    /\\"is_typing\\"\s*:\s*1/gi,
+  ];
+
+  patterns.forEach((pattern) => {
+    let match;
+    while ((match = pattern.exec(ascii)) !== null) {
+      const oneIndex = match.index + match[0].lastIndexOf('1');
+      nextBytes[oneIndex] = 48;
+      changed = true;
+    }
+  });
+
+  if (!changed) return payload;
+  return returnArrayBuffer ? nextBytes.buffer : nextBytes;
 }
 
 function shouldUseMessengerAwayMode(isWindowAway, blockSeen) {
@@ -247,6 +350,30 @@ function installPrivacyProtection(target, config = {}) {
         return target.__messengerAwayMode ? false : originalHasFocus();
       };
 
+      const blockedFocusEvents = new Set(['focus', 'focusin', 'pageshow']);
+      const wrapAwayListener = function(type, listener) {
+        if (!blockedFocusEvents.has(String(type).toLowerCase()) || typeof listener !== 'function') {
+          return listener;
+        }
+
+        return function awayListener(event) {
+          if (target.__messengerAwayMode) return undefined;
+          return listener.apply(this, arguments);
+        };
+      };
+
+      const patchAddEventListener = function(obj) {
+        if (!obj || typeof obj.addEventListener !== 'function' || obj.__messengerAwayEventPatched) return;
+        const originalAddEventListener = obj.addEventListener;
+        obj.addEventListener = function(type, listener, options) {
+          return originalAddEventListener.call(this, type, wrapAwayListener(type, listener), options);
+        };
+        obj.__messengerAwayEventPatched = true;
+      };
+
+      patchAddEventListener(target);
+      patchAddEventListener(doc);
+
       target.__messengerSetAwayMode = function(value) {
         const next = !!value;
         if (target.__messengerAwayMode === next) return;
@@ -276,10 +403,11 @@ function installPrivacyProtection(target, config = {}) {
   if (target.WebSocket?.prototype && typeof target.WebSocket.prototype.send === 'function') {
     const originalWebSocketSend = target.WebSocket.prototype.send;
     target.WebSocket.prototype.send = function privacyWebSocketSend(data) {
-      if (shouldBlockMessengerRequest(this.url, data, target.__messengerPrivacyConfig)) {
+      if (shouldBlockMessengerWebSocketSend(this.url, data, target.__messengerPrivacyConfig)) {
         return undefined;
       }
-      return originalWebSocketSend.apply(this, arguments);
+      const sanitizedData = sanitizeMessengerWebSocketPayload(this.url, data, target.__messengerPrivacyConfig);
+      return originalWebSocketSend.call(this, sanitizedData);
     };
   }
 
@@ -319,6 +447,40 @@ function installPrivacyProtection(target, config = {}) {
       return originalSend.apply(this, arguments);
     };
   }
+
+  if (typeof target.Worker === 'function') {
+    const OriginalWorker = target.Worker;
+    target.Worker = function PrivacyWorker(scriptURL, options) {
+      const worker = new OriginalWorker(scriptURL, options);
+      const originalPostMessage = worker.postMessage;
+      worker.postMessage = function privacyWorkerPostMessage(message, transfer) {
+        if (shouldBlockWorkerMessage(message, target.__messengerPrivacyConfig)) {
+          return undefined;
+        }
+        return originalPostMessage.call(this, message, transfer);
+      };
+      return worker;
+    };
+    target.Worker.prototype = OriginalWorker.prototype;
+  }
+
+  if (typeof target.SharedWorker === 'function') {
+    const OriginalSharedWorker = target.SharedWorker;
+    target.SharedWorker = function PrivacySharedWorker(scriptURL, options) {
+      const worker = new OriginalSharedWorker(scriptURL, options);
+      if (worker.port) {
+        const originalPostMessage = worker.port.postMessage;
+        worker.port.postMessage = function privacySharedWorkerPostMessage(message, transfer) {
+          if (shouldBlockWorkerMessage(message, target.__messengerPrivacyConfig)) {
+            return undefined;
+          }
+          return originalPostMessage.call(this, message, transfer);
+        };
+      }
+      return worker;
+    };
+    target.SharedWorker.prototype = OriginalSharedWorker.prototype;
+  }
 }
 
 async function registerPrivacyScriptForNewDocuments(
@@ -349,6 +511,9 @@ function buildPrivacyPatchSource(targetExpression, config) {
     (function() {
       const payloadToText = ${payloadToText.toString()};
       const shouldBlockMessengerRequest = ${shouldBlockMessengerRequest.toString()};
+      const shouldBlockWorkerMessage = ${shouldBlockWorkerMessage.toString()};
+      const shouldBlockMessengerWebSocketSend = ${shouldBlockMessengerWebSocketSend.toString()};
+      const sanitizeMessengerWebSocketPayload = ${sanitizeMessengerWebSocketPayload.toString()};
       const installPrivacyProtection = ${installPrivacyProtection.toString()};
       installPrivacyProtection(${targetExpression}, ${JSON.stringify({
         blockSeen: !!config.blockSeen,
@@ -376,4 +541,7 @@ module.exports = {
   sanitizePrivacyLogText,
   shouldUseMessengerAwayMode,
   shouldBlockMessengerRequest,
+  shouldBlockWorkerMessage,
+  shouldBlockMessengerWebSocketSend,
+  sanitizeMessengerWebSocketPayload,
 };

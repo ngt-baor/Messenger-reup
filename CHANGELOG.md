@@ -1,5 +1,11 @@
 # Changelog
 
+## Messenger v1.1.3
+
+- Sửa lỗi tin nhắn bị kẹt ở trạng thái "Đang gửi" khi bật chặn "Đang nhập".
+- Thu hẹp rule chặn typing để không bắt nhầm telemetry `send_typing_indicators`.
+- Bổ sung test chống hồi quy cho payload telemetry không phải trạng thái gõ thật.
+
 ## Messenger v1.1.2
 
 - Chặn chính xác trạng thái "Đã xem" gửi qua Messenger Lightspeed WebSocket.

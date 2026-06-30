@@ -28,6 +28,7 @@ const {
   extractMessengerRequestInfo,
   registerPrivacyScriptForNewDocuments,
   shouldBlockMessengerRequest,
+  shouldBlockMessengerWebSocketSend,
   shouldUseMessengerAwayMode,
 } = require('./privacy');
 
@@ -808,13 +809,14 @@ async function setupPrivacyNetworkDebugger(contents) {
       const url = privacyWebSocketUrls.get(params.requestId) || 'wss://unknown';
       const payload = decodeCdpWebSocketPayload(params.response);
       const debugInfo = extractMessengerRequestInfo(url, payload, privacySettings);
+      const wsShouldBlock = shouldBlockMessengerWebSocketSend(url, payload, privacySettings);
       const shouldSample = (privacySettings.blockSeen || privacySettings.blockTyping)
         && privacyWebSocketSampleCount < MAX_PRIVACY_WEBSOCKET_SAMPLES;
 
-      if (debugInfo.isInteresting || debugInfo.shouldBlock || shouldSample) {
+      if (debugInfo.isInteresting || wsShouldBlock || shouldSample) {
         privacyWebSocketSampleCount += 1;
         privacyDebugLog(
-          `[CDP WS ${debugInfo.shouldBlock ? 'MATCH_BLOCK_RULE' : 'SENT'}] URL=${String(url).substring(0, 180)}\n` +
+          `[CDP WS ${wsShouldBlock ? 'MATCH_WS_BLOCK_RULE' : 'SENT'}] URL=${String(url).substring(0, 180)}\n` +
           `  Settings: blockSeen=${privacySettings.blockSeen} blockTyping=${privacySettings.blockTyping}\n` +
           `  Opcode: ${params.response?.opcode ?? '?'} | Mask: ${params.response?.mask ?? '?'} | Length: ${debugInfo.textLength}\n` +
           `  FriendlyName: ${debugInfo.friendlyName || 'N/A'} | DocId: ${debugInfo.docId || 'N/A'}\n` +
@@ -843,11 +845,6 @@ async function setupPrivacyNetworkDebugger(contents) {
   try {
     debuggerApi.on('message', onDebuggerMessage);
     contents.once('destroyed', cleanup);
-    await debuggerApi.sendCommand('Target.setAutoAttach', {
-      autoAttach: true,
-      waitForDebuggerOnStart: true,
-      flatten: true,
-    });
     await debuggerApi.sendCommand('Network.enable');
     privacyDebugLog(`[CDP] Network probe installed for contents.id=${contents.id}`);
   } catch (err) {

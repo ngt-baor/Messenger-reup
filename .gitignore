@@ -3,3 +3,17 @@ dist/
 temp/
 *.log
 .env
+
+# AI Agents & Configurations
+MEMORY.md
+CLAUDE.md
+AGENTS.md
+.agents/
+.codex/
+.claude/
+.cursor/
+.copilot/
+.windsurf/
+.gemini/
+.continue/
+.aider*
