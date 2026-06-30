@@ -1,12 +1,13 @@
 {
   "name": "messenger",
-  "version": "1.1.0",
+  "version": "1.1.2",
   "description": "Ứng dụng Messenger Desktop cho Windows - Chạy trên nhân Chrome (Chromium)",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
     "test:privacy": "node scripts/testPrivacy.js",
     "test:privacy:cdp": "electron scripts/testPrivacyCdp.js",
+    "test:update-ui": "electron scripts/testUpdateProgressUi.js",
     "build": "electron-builder --win",
     "build:portable": "electron-builder --win portable",
     "release": "electron-builder --win --publish always"
@@ -39,7 +40,7 @@
       "uninstallerIcon": "icon.ico",
       "include": "build/installer.nsh",
       "shortcutName": "Messenger",
-      "artifactName": "MessegerSetup-${version}.${ext}"
+      "artifactName": "MessengerSetup-${version}.${ext}"
     },
     "files": [
       "main.js",

@@ -24,6 +24,8 @@ const path = require('path');
 const fs = require('fs');
 const {
   buildPrivacyPatchScript,
+  buildPrivacyWorkerPatchScript,
+  extractMessengerRequestInfo,
   registerPrivacyScriptForNewDocuments,
   shouldBlockMessengerRequest,
   shouldUseMessengerAwayMode,
@@ -334,69 +336,7 @@ function parseUnreadCountFromTitle(title) {
   return match ? parseInt(match[1], 10) : null;
 }
 
-function buildMessengerAwayScript(away) {
-  return `
-    (function() {
-      if (!window.__messengerAwayPatchInstalled) {
-        window.__messengerAwayPatchInstalled = true;
-        window.__messengerAwayMode = false;
-        var hiddenDescriptor = Object.getOwnPropertyDescriptor(Document.prototype, 'hidden');
-        var visibilityDescriptor = Object.getOwnPropertyDescriptor(Document.prototype, 'visibilityState');
-        var originalHasFocus = document.hasFocus ? document.hasFocus.bind(document) : function() { return true; };
-
-        try {
-          Object.defineProperty(Document.prototype, 'hidden', {
-            configurable: true,
-            get: function() {
-              return window.__messengerAwayMode ? true : (hiddenDescriptor && hiddenDescriptor.get ? hiddenDescriptor.get.call(this) : false);
-            }
-          });
-        } catch (e) {}
-
-        try {
-          Object.defineProperty(Document.prototype, 'visibilityState', {
-            configurable: true,
-            get: function() {
-              return window.__messengerAwayMode ? 'hidden' : (visibilityDescriptor && visibilityDescriptor.get ? visibilityDescriptor.get.call(this) : 'visible');
-            }
-          });
-        } catch (e) {}
-
-        document.hasFocus = function() {
-          return window.__messengerAwayMode ? false : originalHasFocus();
-        };
-
-        window.__messengerSetAwayMode = function(value) {
-          var next = !!value;
-          if (window.__messengerAwayMode === next) return;
-          window.__messengerAwayMode = next;
-          window.dispatchEvent(new Event(next ? 'blur' : 'focus'));
-          document.dispatchEvent(new Event('visibilitychange'));
-        };
-      }
-
-      window.__messengerSetAwayMode(${away ? 'true' : 'false'});
-    })();
-  `;
-}
-
-function setWebContentsAwayMode(contents, away) {
-  if (!contents || contents.isDestroyed()) return;
-  contents.executeJavaScript(buildMessengerAwayScript(away)).catch(() => {});
-}
-
-function setAllMessengerAwayMode(away) {
-  Object.values(browserViews).forEach((view) => {
-    if (view && view.webContents) {
-      setWebContentsAwayMode(view.webContents, away);
-    }
-  });
-}
-
 function updateMessengerAwayMode() {
-  setAllMessengerAwayMode(
-    shouldUseMessengerAwayMode(isMessengerAwayModeActive(), settings.blockSeen),
-  );
   updatePagePrivacyProtection();
 }
 
@@ -685,21 +625,249 @@ function getPrivacySettings() {
   };
 }
 
+const PRIVACY_DEBUG_LOG = path.join(app.getPath('userData'), 'privacy-debug.log');
+let privacyDebugStream = null;
+
+function getPrivacyDebugStream() {
+  if (!privacyDebugStream) {
+    try {
+      privacyDebugStream = fs.createWriteStream(PRIVACY_DEBUG_LOG, { flags: 'w' });
+    } catch { return null; }
+  }
+  return privacyDebugStream;
+}
+
+function privacyDebugLog(msg) {
+  const stream = getPrivacyDebugStream();
+  if (stream) stream.write(`[${new Date().toISOString()}] ${msg}\n`);
+}
+
 function setupPrivacyRequestBlocker(sess) {
   if (!sess || privacyRequestSessions.has(sess)) return;
   privacyRequestSessions.add(sess);
+
+  privacyDebugLog('=== Privacy request blocker installed ===');
 
   sess.webRequest.onBeforeRequest(
     { urls: ['*://*.facebook.com/*', '*://*.messenger.com/*'] },
     (details, callback) => {
       const body = (details.uploadData || [])
-        .map((part) => part.bytes ? part.bytes.toString('utf8') : '')
+        .map((part) => {
+          if (part.bytes) return part.bytes.toString('utf8');
+          if (part.blobUUID) return `[blobUUID:${part.blobUUID}]`;
+          return '';
+        })
         .join('');
-      callback({
-        cancel: shouldBlockMessengerRequest(details.url, body, getPrivacySettings()),
-      });
+
+      const privSettings = getPrivacySettings();
+      const shouldBlock = shouldBlockMessengerRequest(details.url, body, privSettings);
+      const debugInfo = extractMessengerRequestInfo(details.url, body, privSettings);
+
+      // Log các request có chứa keyword liên quan đến read/typing/seen
+      const lowerUrl = details.url.toLowerCase();
+      const lowerBody = body.toLowerCase();
+      const isInteresting = lowerBody.includes('mark') || lowerBody.includes('read')
+        || lowerBody.includes('seen') || lowerBody.includes('typing')
+        || lowerBody.includes('indicator') || lowerUrl.includes('typ')
+        || lowerUrl.includes('mark') || lowerUrl.includes('read');
+
+      if (debugInfo.isInteresting || isInteresting || shouldBlock) {
+        let parsedFriendlyName = 'N/A';
+        let parsedDocId = 'N/A';
+        try {
+          const params = new URLSearchParams(body);
+          if (params.has('fb_api_req_friendly_name')) {
+            parsedFriendlyName = params.get('fb_api_req_friendly_name');
+          }
+          if (params.has('doc_id')) {
+            parsedDocId = params.get('doc_id');
+          }
+        } catch (e) {}
+
+        privacyDebugLog(
+          `[${shouldBlock ? 'BLOCKED' : 'ALLOWED'}] URL=${details.url.substring(0, 150)}\n` +
+          `  Settings: blockSeen=${privSettings.blockSeen} blockTyping=${privSettings.blockTyping}\n` +
+          `  Method: ${details.method || '?'}\n` +
+          `  FriendlyName: ${debugInfo.friendlyName || parsedFriendlyName} | DocId: ${debugInfo.docId || parsedDocId}\n` +
+          `  BodyLength: ${debugInfo.textLength}\n` +
+          `  BodyPreview: ${debugInfo.sanitizedPreview}\n` +
+          `  UploadData parts: ${(details.uploadData || []).length}\n`
+        );
+      }
+
+      callback({ cancel: shouldBlock });
     },
   );
+}
+
+const privacyNetworkDebuggerContents = new Set();
+const privacyWebSocketUrls = new Map();
+const privacyWorkerSessionsByContents = new Map();
+let privacyWebSocketSampleCount = 0;
+const MAX_PRIVACY_WEBSOCKET_SAMPLES = 160;
+
+function decodeCdpWebSocketPayload(frame = {}) {
+  const payloadData = frame.payloadData || '';
+  if (frame.opcode === 2) {
+    try {
+      return Buffer.from(payloadData, 'base64');
+    } catch {
+      return payloadData;
+    }
+  }
+  return payloadData;
+}
+
+function isPrivacyHostUrl(url) {
+  try {
+    const host = new URL(url).hostname.toLowerCase();
+    return host === 'facebook.com' || host.endsWith('.facebook.com')
+      || host === 'messenger.com' || host.endsWith('.messenger.com');
+  } catch {
+    return false;
+  }
+}
+
+async function setupPrivacyNetworkDebugger(contents) {
+  if (!contents || contents.isDestroyed() || privacyNetworkDebuggerContents.has(contents.id)) return;
+
+  const debuggerApi = contents.debugger;
+  const workerSessions = new Set();
+  privacyWorkerSessionsByContents.set(contents.id, workerSessions);
+  privacyNetworkDebuggerContents.add(contents.id);
+
+  const cleanup = () => {
+    privacyNetworkDebuggerContents.delete(contents.id);
+    privacyWorkerSessionsByContents.delete(contents.id);
+    try {
+      debuggerApi.removeListener('message', onDebuggerMessage);
+    } catch {}
+  };
+
+  const installWorkerPrivacyPatch = async (sessionId, targetInfo = {}) => {
+    if (!sessionId) return;
+    try {
+      workerSessions.add(sessionId);
+      await debuggerApi.sendCommand('Runtime.enable', {}, sessionId);
+      await debuggerApi.sendCommand('Runtime.evaluate', {
+        expression: buildPrivacyWorkerPatchScript(getPrivacySettings()),
+      }, sessionId);
+      privacyDebugLog(`[CDP] Worker privacy patch installed type=${targetInfo.type || '?'} session=${sessionId}`);
+    } catch (err) {
+      privacyDebugLog(`[CDP ERROR] Failed to install worker privacy patch: ${err.message}`);
+    } finally {
+      try {
+        await debuggerApi.sendCommand('Runtime.runIfWaitingForDebugger', {}, sessionId);
+      } catch {}
+    }
+  };
+
+  const writeCdpHttpLog = (request, payload, privacySettings) => {
+    const debugInfo = extractMessengerRequestInfo(request.url, payload, privacySettings);
+    const isGraphql = String(request.url).toLowerCase().includes('/api/graphql');
+    if (!debugInfo.isInteresting && !debugInfo.shouldBlock && !isGraphql) return;
+
+    privacyDebugLog(
+      `[CDP HTTP ${debugInfo.shouldBlock ? 'MATCH_BLOCK_RULE' : 'OBSERVED'}] URL=${String(request.url).substring(0, 180)}\n` +
+      `  Settings: blockSeen=${privacySettings.blockSeen} blockTyping=${privacySettings.blockTyping}\n` +
+      `  Method: ${request.method || '?'} | HasPostData: ${request.hasPostData ? 'yes' : 'no'} | BodyLength: ${debugInfo.textLength}\n` +
+      `  FriendlyName: ${debugInfo.friendlyName || 'N/A'} | DocId: ${debugInfo.docId || 'N/A'}\n` +
+      `  BodyPreview: ${debugInfo.sanitizedPreview}\n`
+    );
+  };
+
+  const onDebuggerMessage = (event, method, params = {}, sessionId = '') => {
+    const privacySettings = getPrivacySettings();
+
+    if (method === 'Target.attachedToTarget') {
+      const type = params.targetInfo?.type || '';
+      if (type.includes('worker')) {
+        installWorkerPrivacyPatch(params.sessionId, params.targetInfo);
+      } else if (params.sessionId) {
+        debuggerApi.sendCommand('Runtime.runIfWaitingForDebugger', {}, params.sessionId).catch(() => {});
+      }
+      return;
+    }
+
+    if (method === 'Target.detachedFromTarget') {
+      if (params.sessionId) workerSessions.delete(params.sessionId);
+      return;
+    }
+
+    if (method === 'Network.webSocketCreated') {
+      if (params.requestId && params.url) privacyWebSocketUrls.set(params.requestId, params.url);
+      return;
+    }
+
+    if (method === 'Network.webSocketClosed') {
+      if (params.requestId) privacyWebSocketUrls.delete(params.requestId);
+      return;
+    }
+
+    if (method === 'Network.webSocketFrameSent') {
+      const url = privacyWebSocketUrls.get(params.requestId) || 'wss://unknown';
+      const payload = decodeCdpWebSocketPayload(params.response);
+      const debugInfo = extractMessengerRequestInfo(url, payload, privacySettings);
+      const shouldSample = (privacySettings.blockSeen || privacySettings.blockTyping)
+        && privacyWebSocketSampleCount < MAX_PRIVACY_WEBSOCKET_SAMPLES;
+
+      if (debugInfo.isInteresting || debugInfo.shouldBlock || shouldSample) {
+        privacyWebSocketSampleCount += 1;
+        privacyDebugLog(
+          `[CDP WS ${debugInfo.shouldBlock ? 'MATCH_BLOCK_RULE' : 'SENT'}] URL=${String(url).substring(0, 180)}\n` +
+          `  Settings: blockSeen=${privacySettings.blockSeen} blockTyping=${privacySettings.blockTyping}\n` +
+          `  Opcode: ${params.response?.opcode ?? '?'} | Mask: ${params.response?.mask ?? '?'} | Length: ${debugInfo.textLength}\n` +
+          `  FriendlyName: ${debugInfo.friendlyName || 'N/A'} | DocId: ${debugInfo.docId || 'N/A'}\n` +
+          `  PayloadPreview: ${debugInfo.sanitizedPreview}\n`
+        );
+      }
+      return;
+    }
+
+    if (method !== 'Network.requestWillBeSent') return;
+
+    const request = params.request || {};
+    if (!request.url || !isPrivacyHostUrl(request.url)) return;
+    if (request.method && request.method !== 'POST') return;
+
+    if (!request.postData && request.hasPostData && params.requestId) {
+      debuggerApi.sendCommand('Network.getRequestPostData', { requestId: params.requestId })
+        .then((result) => writeCdpHttpLog(request, result?.postData || '', privacySettings))
+        .catch(() => writeCdpHttpLog(request, '', privacySettings));
+      return;
+    }
+
+    writeCdpHttpLog(request, request.postData || '', privacySettings);
+  };
+
+  try {
+    debuggerApi.on('message', onDebuggerMessage);
+    contents.once('destroyed', cleanup);
+    await debuggerApi.sendCommand('Target.setAutoAttach', {
+      autoAttach: true,
+      waitForDebuggerOnStart: true,
+      flatten: true,
+    });
+    await debuggerApi.sendCommand('Network.enable');
+    privacyDebugLog(`[CDP] Network probe installed for contents.id=${contents.id}`);
+  } catch (err) {
+    cleanup();
+    privacyDebugLog(`[CDP ERROR] Failed to install network probe: ${err.message}`);
+  }
+}
+
+function updateWorkerPrivacyProtection(contents, privacySettings) {
+  if (!contents || contents.isDestroyed()) return;
+  const workerSessions = privacyWorkerSessionsByContents.get(contents.id);
+  if (!workerSessions || workerSessions.size === 0) return;
+
+  workerSessions.forEach((sessionId) => {
+    contents.debugger.sendCommand('Runtime.evaluate', {
+      expression: buildPrivacyWorkerPatchScript(privacySettings),
+    }, sessionId).catch((err) => {
+      privacyDebugLog(`[CDP ERROR] Failed to update worker privacy settings: ${err.message}`);
+    });
+  });
 }
 
 function updatePagePrivacyProtection() {
@@ -708,6 +876,7 @@ function updatePagePrivacyProtection() {
     const contents = view?.webContents;
     if (!contents || contents.isDestroyed()) return;
     registerPrivacyScript(contents, privacySettings);
+    updateWorkerPrivacyProtection(contents, privacySettings);
     contents.send('privacy-settings-updated', privacySettings);
     contents.executeJavaScript(buildPrivacyPatchScript(privacySettings)).catch(() => {});
   });
@@ -729,6 +898,41 @@ function toggleBlockTyping(enable) {
 //  AUTO UPDATER
 // ============================================================
 let isManualUpdateCheck = false;
+let isUpdateDownloadActive = false;
+let pendingUpdateVersion = '';
+
+function showUpdateProgress(state) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+
+  restoreMainWindow();
+  mainWindow.setBrowserView(null);
+  mainWindow.webContents.send('update-progress-state', {
+    visible: true,
+    version: pendingUpdateVersion,
+    ...state,
+  });
+
+  if (state.phase === 'error') {
+    mainWindow.setProgressBar(1, { mode: 'error' });
+  } else if (Number.isFinite(state.percent)) {
+    mainWindow.setProgressBar(Math.max(0, Math.min(100, state.percent)) / 100, {
+      mode: 'normal',
+    });
+  } else {
+    mainWindow.setProgressBar(0.01, { mode: 'indeterminate' });
+  }
+}
+
+function closeUpdateProgress() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.setProgressBar(-1);
+  mainWindow.webContents.send('update-progress-state', { visible: false });
+  if (activeProfileId && browserViews[activeProfileId]) {
+    mainWindow.setBrowserView(browserViews[activeProfileId]);
+    updateBrowserViewBounds();
+    updateMessengerAwayMode();
+  }
+}
 
 function setupAutoUpdater() {
   autoUpdater.autoDownload = false;
@@ -738,6 +942,7 @@ function setupAutoUpdater() {
   });
 
   autoUpdater.on('update-available', (info) => {
+    pendingUpdateVersion = info.version || '';
     dialog.showMessageBox({
       type: 'info',
       title: 'Có bản cập nhật mới',
@@ -745,7 +950,21 @@ function setupAutoUpdater() {
       buttons: ['Tải xuống', 'Bỏ qua']
     }).then(result => {
       if (result.response === 0) {
-        autoUpdater.downloadUpdate();
+        isUpdateDownloadActive = true;
+        showUpdateProgress({
+          phase: 'downloading',
+          percent: 0,
+          transferred: 0,
+          total: 0,
+          bytesPerSecond: 0,
+        });
+        autoUpdater.downloadUpdate().catch((error) => {
+          showUpdateProgress({
+            phase: 'error',
+            message: error?.message || 'Không thể tải bản cập nhật.',
+          });
+          isUpdateDownloadActive = false;
+        });
       }
     });
   });
@@ -760,12 +979,32 @@ function setupAutoUpdater() {
     }
   });
 
+  autoUpdater.on('download-progress', (progress) => {
+    if (!isUpdateDownloadActive) return;
+    showUpdateProgress({
+      phase: 'downloading',
+      percent: progress.percent,
+      transferred: progress.transferred,
+      total: progress.total,
+      bytesPerSecond: progress.bytesPerSecond,
+    });
+  });
+
   autoUpdater.on('update-downloaded', () => {
+    isUpdateDownloadActive = false;
+    showUpdateProgress({
+      phase: 'downloaded',
+      percent: 100,
+    });
     dialog.showMessageBox({
       title: 'Đã tải xong cập nhật',
       message: 'Bản cập nhật đã được tải xuống. Ứng dụng sẽ khởi động lại để cài đặt.',
       buttons: ['Cài đặt và Khởi động lại']
     }).then(() => {
+      showUpdateProgress({
+        phase: 'installing',
+        percent: 100,
+      });
       prepareForFullQuit();
       autoUpdater.quitAndInstall();
       setTimeout(() => app.exit(0), 5000).unref();
@@ -773,8 +1012,16 @@ function setupAutoUpdater() {
   });
 
   autoUpdater.on('error', (err) => {
+    const errorMessage = err == null ? 'Lỗi không xác định' : (err.stack || err).toString();
+    if (isUpdateDownloadActive) {
+      isUpdateDownloadActive = false;
+      showUpdateProgress({
+        phase: 'error',
+        message: errorMessage,
+      });
+    }
+
     if (isManualUpdateCheck) {
-      let errorMessage = err == null ? "Lỗi không xác định" : (err.stack || err).toString();
       if (errorMessage.includes('No published versions on GitHub') || errorMessage.includes('404 Not Found')) {
         dialog.showMessageBox({
           type: 'info',
@@ -943,19 +1190,33 @@ async function registerPrivacyScript(contents, privacySettings = getPrivacySetti
 
   try {
     const previousIdentifier = privacyScriptIdentifiers.get(contents.id) || null;
+    privacyDebugLog(`[CDP] Attempting to attach debugger for contents.id=${contents.id}. Previous identifier=${previousIdentifier}`);
+
+    if (!contents.debugger.isAttached()) {
+      contents.debugger.attach('1.3');
+      privacyDebugLog(`[CDP] Debugger attached successfully for contents.id=${contents.id}`);
+    }
+
+    await setupPrivacyNetworkDebugger(contents);
+
     const identifier = await registerPrivacyScriptForNewDocuments(
       contents.debugger,
       privacySettings,
       previousIdentifier,
     );
+
     if (identifier) {
       if (!previousIdentifier) {
         contents.once('destroyed', () => privacyScriptIdentifiers.delete(contents.id));
       }
       privacyScriptIdentifiers.set(contents.id, identifier);
+      privacyDebugLog(`[CDP] Privacy script registered on new documents successfully. Identifier=${identifier}`);
+    } else {
+      privacyDebugLog(`[CDP] Privacy script registration returned null identifier`);
     }
     return identifier;
-  } catch {
+  } catch (err) {
+    privacyDebugLog(`[CDP ERROR] Failed to register privacy script: ${err.message}\nStack: ${err.stack}`);
     return null;
   }
 }
@@ -988,7 +1249,7 @@ function getMessengerPopupOptions(partition) {
   };
 }
 
-function setupWebContents(contents, profileId, partition, options = {}) {
+async function setupWebContents(contents, profileId, partition, options = {}) {
   if (profileId) {
     webContentsProfiles.set(contents.id, profileId);
     contents.once('destroyed', () => webContentsProfiles.delete(contents.id));
@@ -997,6 +1258,9 @@ function setupWebContents(contents, profileId, partition, options = {}) {
   // Setup download handler for this view's session
   setupDownloadHandler(contents.session);
   setupPrivacyRequestBlocker(contents.session);
+
+  // Register CDP privacy script BEFORE page loads to intercept from the start
+  await preparePrivacyScript(contents);
 
   contents.setWindowOpenHandler(({ url }) => {
     if (isInAppPopupUrl(url)) {
@@ -1069,10 +1333,6 @@ function setupWebContents(contents, profileId, partition, options = {}) {
       const cssData = fs.readFileSync(cssPath, 'utf8');
       contents.insertCSS(cssData);
     } catch(e) {}
-    setWebContentsAwayMode(
-      contents,
-      shouldUseMessengerAwayMode(isMessengerAwayModeActive(), settings.blockSeen),
-    );
     contents.executeJavaScript(buildPrivacyPatchScript(getPrivacySettings())).catch(() => {});
     installMessengerUnreadObserver(contents);
   });
@@ -1322,6 +1582,12 @@ function createWindow() {
       updateBrowserViewBounds();
     } else {
       mainWindow.setBrowserView(null);
+    }
+  });
+
+  ipcMain.on('close-update-progress', () => {
+    if (!isUpdateDownloadActive) {
+      closeUpdateProgress();
     }
   });
 

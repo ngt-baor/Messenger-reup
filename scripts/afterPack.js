@@ -7,6 +7,7 @@ module.exports = async function afterPack(context) {
   const iconPath = path.join(context.packager.projectDir, 'icon.ico');
   const exeName = `${context.packager.appInfo.productFilename}.exe`;
   const exePath = path.join(context.appOutDir, exeName);
+  const version = context.packager.appInfo.version;
 
   if (!fs.existsSync(exePath)) {
     throw new Error(`Cannot find Windows executable to set icon: ${exePath}`);
@@ -15,6 +16,8 @@ module.exports = async function afterPack(context) {
   const { rcedit } = await import('rcedit');
   await rcedit(exePath, {
     icon: iconPath,
+    'file-version': version,
+    'product-version': version,
     'version-string': {
       ProductName: 'Messenger',
       FileDescription: 'Messenger',

@@ -825,3 +825,68 @@ ipcRenderer.on('download-done', (event, data) => {
     }
   }
 });
+
+// App update progress
+const updateProgressOverlay = document.getElementById('update-progress-overlay');
+const updateProgressHeading = document.getElementById('update-progress-heading');
+const updateProgressStatus = document.getElementById('update-progress-status');
+const updateProgressDetail = document.getElementById('update-progress-detail');
+const updateProgressPercent = document.getElementById('update-progress-percent');
+const updateProgressTrack = document.getElementById('update-progress-track');
+const updateProgressFill = document.getElementById('update-progress-fill');
+const updateProgressClose = document.getElementById('update-progress-close');
+
+updateProgressClose.addEventListener('click', () => {
+  ipcRenderer.send('close-update-progress');
+});
+
+ipcRenderer.on('update-progress-state', (event, state = {}) => {
+  if (!state.visible) {
+    updateProgressOverlay.classList.remove('visible');
+    updateProgressOverlay.setAttribute('aria-hidden', 'true');
+    return;
+  }
+
+  updateProgressOverlay.classList.add('visible');
+  updateProgressOverlay.setAttribute('aria-hidden', 'false');
+  updateProgressHeading.textContent = state.version
+    ? `Đang cập nhật Messenger ${state.version}`
+    : 'Đang cập nhật Messenger';
+
+  const hasPercent = Number.isFinite(state.percent);
+  const percent = hasPercent
+    ? Math.max(0, Math.min(100, Math.round(state.percent)))
+    : 0;
+
+  updateProgressTrack.classList.toggle('indeterminate', !hasPercent && state.phase !== 'error');
+  updateProgressFill.style.width = hasPercent ? `${percent}%` : '0';
+  updateProgressPercent.textContent = state.phase === 'error'
+    ? 'Lỗi'
+    : (hasPercent ? `${percent}%` : '...');
+  updateProgressClose.classList.toggle('visible', state.phase === 'error');
+
+  if (state.phase === 'downloading') {
+    updateProgressStatus.textContent = 'Đang tải bản cập nhật...';
+    if (state.total > 0) {
+      const speed = state.bytesPerSecond > 0
+        ? ` · ${formatBytes(state.bytesPerSecond)}/s`
+        : '';
+      updateProgressDetail.textContent =
+        `${formatBytes(state.transferred || 0)} / ${formatBytes(state.total)}${speed}`;
+    } else {
+      updateProgressDetail.textContent = 'Đang kết nối...';
+    }
+  } else if (state.phase === 'downloaded') {
+    updateProgressStatus.textContent = 'Đã tải xong bản cập nhật';
+    updateProgressDetail.textContent = 'Sẵn sàng cài đặt';
+  } else if (state.phase === 'installing') {
+    updateProgressStatus.textContent = 'Đang khởi động trình cài đặt...';
+    updateProgressDetail.textContent = 'Messenger sẽ tự khởi động lại';
+  } else if (state.phase === 'error') {
+    updateProgressStatus.textContent = 'Không thể cập nhật Messenger';
+    updateProgressDetail.textContent = state.message || 'Vui lòng thử lại sau.';
+  } else {
+    updateProgressStatus.textContent = 'Đang chuẩn bị cập nhật...';
+    updateProgressDetail.textContent = 'Đang kết nối...';
+  }
+});

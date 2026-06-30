@@ -8,23 +8,46 @@ function payloadToText(payload) {
     return payload.toString();
   }
 
+  let bytes = null;
   if (typeof ArrayBuffer !== 'undefined') {
-    let bytes = null;
     if (payload instanceof ArrayBuffer) {
       bytes = new Uint8Array(payload);
     } else if (ArrayBuffer.isView(payload)) {
       bytes = new Uint8Array(payload.buffer, payload.byteOffset, payload.byteLength);
     }
-
-    if (bytes && typeof TextDecoder !== 'undefined') {
-      try {
-        return new TextDecoder().decode(bytes);
-      } catch {}
-    }
   }
 
   if (typeof Buffer !== 'undefined' && Buffer.isBuffer(payload)) {
-    return payload.toString('utf8');
+    bytes = payload;
+  }
+
+  if (bytes) {
+    let decodedStr = '';
+    if (typeof TextDecoder !== 'undefined') {
+      try {
+        decodedStr = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+      } catch (e) {}
+    }
+
+    let asciiStr = '';
+    for (let i = 0; i < bytes.length; i++) {
+      const b = bytes[i];
+      if (b >= 32 && b <= 126) {
+        asciiStr += String.fromCharCode(b);
+      } else {
+        asciiStr += ' ';
+      }
+    }
+
+    // Nếu giải mã bình thường rỗng hoặc chứa quá nhiều kí tự rác,
+    // ta dùng giải pháp byte-by-byte trích xuất ASCII
+    if (!decodedStr || decodedStr.includes('\uFFFD')) {
+      return asciiStr;
+    }
+    if (asciiStr.trim() && asciiStr !== decodedStr) {
+      return `${decodedStr}\n${asciiStr}`;
+    }
+    return decodedStr;
   }
 
   try {
@@ -32,6 +55,86 @@ function payloadToText(payload) {
   } catch {
     return String(payload);
   }
+}
+
+function sanitizePrivacyLogText(value) {
+  let text = payloadToText(value);
+
+  const paramNames = [
+    '__user',
+    'av',
+    'fb_dtsg',
+    'lsd',
+    'jazoest',
+    '__hsi',
+    '__dyn',
+    '__csr',
+    '__spin_r',
+    '__spin_b',
+    '__spin_t',
+    'access_token',
+    'token',
+    'auth',
+    'authorization',
+    'cookie',
+    'password',
+    'pass',
+  ];
+
+  paramNames.forEach((name) => {
+    const encodedName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    text = text.replace(new RegExp(`(${encodedName}=)[^&\\s]+`, 'gi'), '$1<redacted>');
+    text = text.replace(new RegExp(`("${encodedName}"\\s*:\\s*")[^"]*(")`, 'gi'), '$1<redacted>$2');
+  });
+
+  text = text.replace(/(Bearer\s+)[A-Za-z0-9._~+/=-]+/gi, '$1<redacted>');
+  text = text.replace(/(DTSGInitialData[^&\s"]{0,80})/gi, '<redacted-dtsg>');
+  return text;
+}
+
+function extractMessengerRequestInfo(url, payload, config = {}) {
+  const text = payloadToText(payload);
+  const lowerUrl = String(url || '').toLowerCase();
+  const lowerBody = text.toLowerCase();
+  const shouldBlock = shouldBlockMessengerRequest(url, payload, config);
+  const keywords = [
+    'mark',
+    'read',
+    'seen',
+    'typing',
+    'indicator',
+    'receipt',
+    'lsthread',
+    'lstyping',
+    'mawthread',
+    'mawsend',
+  ];
+
+  let friendlyName = '';
+  let docId = '';
+  try {
+    const params = new URLSearchParams(text);
+    friendlyName = params.get('fb_api_req_friendly_name') || params.get('friendly_name') || '';
+    docId = params.get('doc_id') || '';
+  } catch (e) {}
+
+  if (!friendlyName) {
+    const match = text.match(/(?:fb_api_req_friendly_name|friendly_name)["'=:%26]+([^&"',\s]+)/i);
+    friendlyName = match ? decodeURIComponent(match[1]) : '';
+  }
+  if (!docId) {
+    const match = text.match(/doc_id["'=:%26]+([0-9]+)/i);
+    docId = match ? match[1] : '';
+  }
+
+  return {
+    shouldBlock,
+    isInteresting: shouldBlock || keywords.some((keyword) => lowerBody.includes(keyword) || lowerUrl.includes(keyword)),
+    friendlyName,
+    docId,
+    sanitizedPreview: sanitizePrivacyLogText(text).slice(0, 8000),
+    textLength: text.length,
+  };
 }
 
 function shouldBlockMessengerRequest(url, payload, config = {}) {
@@ -50,6 +153,14 @@ function shouldBlockMessengerRequest(url, payload, config = {}) {
       'threadmarkreadmutation',
       'markthreadreadmutation',
       '"name":"mark_read"',
+      'friendly_name=markread',
+      'friendly_name=mark_seen',
+      '"markread"',
+      '"mark_seen"',
+      'readreceipt',
+      'read_receipt',
+      'last_read_watermark_ts',
+      '\\"last_read_watermark_ts\\":',
     ];
 
     if (
@@ -70,6 +181,12 @@ function shouldBlockMessengerRequest(url, payload, config = {}) {
       'mawsendtypingindicator',
       'typingindicatormutation',
       'sendtypingindicatormutation',
+      'friendly_name=typingindicator',
+      '"typingindicator"',
+      '"typing_indicator"',
+      '"is_typing":',
+      '\\"is_typing\\":',
+      'send_typing_indicators',
     ];
 
     if (
@@ -93,8 +210,54 @@ function installPrivacyProtection(target, config = {}) {
     blockTyping: !!config.blockTyping,
   };
 
+  if (target.__messengerSetAwayMode) {
+    target.__messengerSetAwayMode(!!config.blockSeen);
+  }
+
   if (target.__messengerPrivacyInstalled) return;
   target.__messengerPrivacyInstalled = true;
+
+  // Cài đặt Away Mode (chặn Đã xem bằng cách giả lập mất focus)
+  (function installAwayMode() {
+    target.__messengerAwayMode = !!config.blockSeen;
+    const doc = target.document;
+    if (!doc) return;
+
+    try {
+      const docProto = doc.constructor?.prototype || doc.prototype || doc;
+      const hiddenDescriptor = Object.getOwnPropertyDescriptor(docProto, 'hidden');
+      const visibilityDescriptor = Object.getOwnPropertyDescriptor(docProto, 'visibilityState');
+      const originalHasFocus = doc.hasFocus ? doc.hasFocus.bind(doc) : function() { return true; };
+
+      Object.defineProperty(docProto, 'hidden', {
+        configurable: true,
+        get: function() {
+          return target.__messengerAwayMode ? true : (hiddenDescriptor && hiddenDescriptor.get ? hiddenDescriptor.get.call(this) : false);
+        }
+      });
+
+      Object.defineProperty(docProto, 'visibilityState', {
+        configurable: true,
+        get: function() {
+          return target.__messengerAwayMode ? 'hidden' : (visibilityDescriptor && visibilityDescriptor.get ? visibilityDescriptor.get.call(this) : 'visible');
+        }
+      });
+
+      doc.hasFocus = function() {
+        return target.__messengerAwayMode ? false : originalHasFocus();
+      };
+
+      target.__messengerSetAwayMode = function(value) {
+        const next = !!value;
+        if (target.__messengerAwayMode === next) return;
+        target.__messengerAwayMode = next;
+        try {
+          target.dispatchEvent(new Event(next ? 'blur' : 'focus'));
+          doc.dispatchEvent(new Event('visibilitychange'));
+        } catch (e) {}
+      };
+    } catch (e) {}
+  })();
 
   if (typeof target.fetch === 'function') {
     const originalFetch = target.fetch;
@@ -129,6 +292,33 @@ function installPrivacyProtection(target, config = {}) {
       return originalSendBeacon.apply(this, arguments);
     };
   }
+
+  if (typeof target.XMLHttpRequest === 'function') {
+    const XHR = target.XMLHttpRequest;
+    const originalOpen = XHR.prototype.open;
+    const originalSend = XHR.prototype.send;
+
+    XHR.prototype.open = function privacyXHROpen(method, url) {
+      this.__privacyUrl = url;
+      return originalOpen.apply(this, arguments);
+    };
+
+    XHR.prototype.send = function privacyXHRSend(body) {
+      if (shouldBlockMessengerRequest(this.__privacyUrl, body, target.__messengerPrivacyConfig)) {
+        Object.defineProperty(this, 'status', { value: 200, writable: false, configurable: true });
+        Object.defineProperty(this, 'readyState', { value: 4, writable: false, configurable: true });
+        Object.defineProperty(this, 'responseText', { value: '{}', writable: false, configurable: true });
+        Object.defineProperty(this, 'response', { value: '{}', writable: false, configurable: true });
+        var self = this;
+        setTimeout(function() {
+          if (typeof self.onreadystatechange === 'function') self.onreadystatechange();
+          if (typeof self.onload === 'function') self.onload();
+        }, 0);
+        return;
+      }
+      return originalSend.apply(this, arguments);
+    };
+  }
 }
 
 async function registerPrivacyScriptForNewDocuments(
@@ -154,13 +344,13 @@ async function registerPrivacyScriptForNewDocuments(
   return result?.identifier || null;
 }
 
-function buildPrivacyPatchScript(config) {
+function buildPrivacyPatchSource(targetExpression, config) {
   return `
     (function() {
       const payloadToText = ${payloadToText.toString()};
       const shouldBlockMessengerRequest = ${shouldBlockMessengerRequest.toString()};
       const installPrivacyProtection = ${installPrivacyProtection.toString()};
-      installPrivacyProtection(window, ${JSON.stringify({
+      installPrivacyProtection(${targetExpression}, ${JSON.stringify({
         blockSeen: !!config.blockSeen,
         blockTyping: !!config.blockTyping,
       })});
@@ -168,11 +358,22 @@ function buildPrivacyPatchScript(config) {
   `;
 }
 
+function buildPrivacyPatchScript(config) {
+  return buildPrivacyPatchSource('window', config);
+}
+
+function buildPrivacyWorkerPatchScript(config) {
+  return buildPrivacyPatchSource('self', config);
+}
+
 module.exports = {
   buildPrivacyPatchScript,
+  buildPrivacyWorkerPatchScript,
+  extractMessengerRequestInfo,
   installPrivacyProtection,
   payloadToText,
   registerPrivacyScriptForNewDocuments,
+  sanitizePrivacyLogText,
   shouldUseMessengerAwayMode,
   shouldBlockMessengerRequest,
 };

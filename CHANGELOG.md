@@ -1,5 +1,19 @@
 # Changelog
 
+## Messenger v1.1.2
+
+- Chặn chính xác trạng thái "Đã xem" gửi qua Messenger Lightspeed WebSocket.
+- Chặn chính xác trạng thái "Đang nhập" gửi qua WebSocket, kể cả payload JSON bị escape.
+- Bổ sung hook cho Worker/SharedWorker để bảo mật vẫn hoạt động khi Messenger chạy nền xử lý trong worker.
+- Đồng bộ tên file cài đặt Windows thành `MessengerSetup`.
+- Bổ sung test cho payload WebSocket thực tế và worker privacy hook.
+
+## Messenger v1.1.1
+
+- Hiển thị thanh tiến trình và phần trăm khi tải bản cập nhật.
+- Hiển thị dung lượng đã tải, tổng dung lượng và tốc độ tải.
+- Đồng bộ tiến trình cập nhật với thanh taskbar Windows.
+
 ## Messenger v1.0
 
 Phiên bản đầu tiên của ứng dụng Messenger Desktop cho Windows.
