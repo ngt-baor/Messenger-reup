@@ -125,6 +125,14 @@ function renderSidebar() {
       img.src = p.avatar.startsWith('http') ? p.avatar : `file://${p.avatar.replace(/\\/g, '/')}`;
       img.style.width = '100%'; img.style.height = '100%'; img.style.borderRadius = '50%';
       img.style.objectFit = 'cover'; img.style.position = 'absolute'; img.style.top = '0'; img.style.left = '0';
+      img.onerror = () => {
+        const current = profiles.find(x => x.id === p.id);
+        if (current && current.avatar === p.avatar) {
+          current.avatar = null;
+          saveProfiles();
+          renderSidebar();
+        }
+      };
       btn.appendChild(img);
       span.style.display = 'none';
     } else {
@@ -202,6 +210,7 @@ function updateAvatarPreview() {
 nameInput.addEventListener('input', updateAvatarPreview);
 
 avatarPreview.onclick = () => avatarInput.click();
+document.getElementById('avatar-picker-text').addEventListener('click', () => avatarInput.click());
 avatarInput.onchange = (e) => {
   if (e.target.files && e.target.files[0]) {
     tempAvatarPath = e.target.files[0].path;
@@ -282,7 +291,7 @@ document.getElementById('modal-logout').onclick = () => {
 ipcRenderer.on('logout-profile-done', (event, { id, success }) => {
   const logoutBtn = document.getElementById('modal-logout');
   if (success) {
-    logoutBtn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg> ✅ Đã đăng xuất!';
+    logoutBtn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg> Đã đăng xuất';
     logoutBtn.style.color = '#51cf66';
     logoutBtn.style.borderColor = '#51cf66';
     setTimeout(() => {
@@ -294,7 +303,7 @@ ipcRenderer.on('logout-profile-done', (event, { id, success }) => {
       ipcRenderer.send('set-browserview-visibility', true);
     }, 800);
   } else {
-    logoutBtn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg> ❌ Lỗi! Thử lại';
+    logoutBtn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg> Lỗi, thử lại';
     logoutBtn.classList.remove('loading');
   }
 });
@@ -362,7 +371,7 @@ ipcRenderer.on('update-profile-badge', (event, { id, count }) => {
 ipcRenderer.on('update-profile-avatar', (event, { id, avatarUrl }) => {
   const p = profiles.find(x => x.id === id);
   if (p) {
-    const isAutoAvatar = !p.avatar || p.avatar.includes('graph.facebook.com') || p.avatar.includes('scontent') || p.avatar.includes('fbcdn');
+    const isAutoAvatar = !p.avatar || p.avatar.startsWith('http');
     if (isAutoAvatar && p.avatar !== avatarUrl) {
       p.avatar = avatarUrl;
       saveProfiles();
@@ -477,7 +486,7 @@ function handlePinComplete() {
     if (lock.enteredPin === lock.setupPin) {
       const hash = hashPin(lock.enteredPin);
       ipcRenderer.send('save-lock-settings', { enabled: true, hash });
-      lockMessage.textContent = '✅ Đã thiết lập mã PIN!';
+      lockMessage.textContent = 'Đã thiết lập mã PIN';
       lockMessage.className = 'lock-subtitle success';
       setTimeout(unlockApp, 700);
     } else {
@@ -499,7 +508,7 @@ function handlePinComplete() {
     // Verify PIN
     const hash = hashPin(lock.enteredPin);
     if (hash === ls.hash) {
-      lockMessage.textContent = '✅ Đã mở khoá!';
+      lockMessage.textContent = 'Đã mở khoá';
       lockMessage.className = 'lock-subtitle success';
       setTimeout(unlockApp, 300);
     } else {
@@ -673,24 +682,30 @@ function formatBytes(bytes) {
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
 }
 
-function getFileIcon(filename) {
+function getFileTypeLabel(filename) {
   const ext = (filename.split('.').pop() || '').toLowerCase();
-  const icons = {
-    'jpg': '🖼️', 'jpeg': '🖼️', 'png': '🖼️', 'gif': '🖼️', 'webp': '🖼️', 'svg': '🖼️', 'bmp': '🖼️',
-    'mp4': '🎬', 'avi': '🎬', 'mkv': '🎬', 'mov': '🎬', 'webm': '🎬',
-    'mp3': '🎵', 'wav': '🎵', 'ogg': '🎵', 'flac': '🎵', 'aac': '🎵',
-    'pdf': '📄', 'doc': '📝', 'docx': '📝', 'xls': '📊', 'xlsx': '📊', 'ppt': '📊', 'pptx': '📊',
-    'zip': '📦', 'rar': '📦', '7z': '📦', 'tar': '📦', 'gz': '📦',
-    'exe': '⚙️', 'msi': '⚙️', 'apk': '📱',
-    'txt': '📃', 'json': '📃', 'csv': '📃', 'xml': '📃',
-  };
-  return icons[ext] || '📎';
+  if (!ext || ext === filename.toLowerCase()) return 'FILE';
+  return ext.slice(0, 4).toUpperCase();
 }
 
-function showDlToast(msg) {
-  dlToast.innerHTML = msg;
+function showDlToast(prefix, filename = '') {
+  dlToast.textContent = prefix;
+  if (filename) {
+    const name = document.createElement('b');
+    name.textContent = filename;
+    dlToast.appendChild(name);
+  }
   dlToast.classList.add('show');
   setTimeout(() => dlToast.classList.remove('show'), 3000);
+}
+
+function createDownloadActionButton(title, svgMarkup, onClick) {
+  const button = document.createElement('button');
+  button.className = 'dl-action-btn';
+  button.title = title;
+  button.innerHTML = svgMarkup;
+  button.addEventListener('click', onClick);
+  return button;
 }
 
 function renderDownloads() {
@@ -711,7 +726,7 @@ function renderDownloads() {
 
     const pct = dl.total > 0 ? Math.round((dl.received / dl.total) * 100) : 0;
     const iconClass = dl.done ? (dl.state === 'completed' ? 'dl-done' : 'dl-error') : '';
-    const statusIcon = dl.done ? (dl.state === 'completed' ? '✅' : '❌') : getFileIcon(dl.filename);
+    const fileTypeLabel = getFileTypeLabel(dl.filename);
     const statusText = dl.done
       ? (dl.state === 'completed' ? 'Hoàn tất' : (dl.state === 'cancelled' ? 'Đã huỷ' : 'Lỗi'))
       : (dl.state === 'interrupted' ? 'Tạm dừng' : `${pct}%`);
@@ -719,30 +734,48 @@ function renderDownloads() {
       ? `${formatBytes(dl.received)} / ${formatBytes(dl.total)}`
       : (dl.received > 0 ? formatBytes(dl.received) : 'Đang tải...');
 
-    let actionsHtml = '';
-    if (dl.done && dl.state === 'completed') {
-      actionsHtml = `
-        <button class="dl-action-btn" onclick="ipcRenderer.send('open-download-file','${dl.savePath.replace(/\\/g, '\\\\')}')" title="Mở file">
-          <svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-        </button>
-        <button class="dl-action-btn" onclick="ipcRenderer.send('open-download-folder','${dl.savePath.replace(/\\/g, '\\\\')}')" title="Mở thư mục">
-          <svg viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>
-        </button>`;
-    } else if (!dl.done) {
-      actionsHtml = `
-        <button class="dl-action-btn" onclick="ipcRenderer.send('cancel-download',${dl.id})" title="Huỷ">
-          <svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-        </button>`;
-    }
-
     item.innerHTML = `
-      <div class="dl-icon ${iconClass}">${statusIcon}</div>
+      <div class="dl-icon ${iconClass}"></div>
       <div class="dl-info">
-        <div class="dl-filename" title="${dl.filename}">${dl.filename}</div>
-        <div class="dl-meta"><span>${statusText}</span><span>·</span><span>${sizeText}</span></div>
-        ${!dl.done ? `<div class="dl-progress-bar"><div class="dl-progress-fill" style="width:${pct}%"></div></div>` : ''}
+        <div class="dl-filename"></div>
+        <div class="dl-meta"><span></span><span>·</span><span></span></div>
+        ${!dl.done ? '<div class="dl-progress-bar"><div class="dl-progress-fill"></div></div>' : ''}
       </div>
-      <div class="dl-actions">${actionsHtml}</div>`;
+      <div class="dl-actions"></div>`;
+
+    item.querySelector('.dl-icon').textContent = fileTypeLabel;
+    const filenameEl = item.querySelector('.dl-filename');
+    filenameEl.textContent = dl.filename;
+    filenameEl.setAttribute('title', dl.filename);
+
+    const metaSpans = item.querySelectorAll('.dl-meta span');
+    metaSpans[0].textContent = statusText;
+    metaSpans[2].textContent = sizeText;
+
+    const progressFill = item.querySelector('.dl-progress-fill');
+    if (progressFill) progressFill.style.width = `${pct}%`;
+
+    const actions = item.querySelector('.dl-actions');
+    if (dl.done && dl.state === 'completed') {
+      actions.append(
+        createDownloadActionButton(
+          'Mở file',
+          '<svg viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>',
+          () => ipcRenderer.send('open-download-file', dl.savePath)
+        ),
+        createDownloadActionButton(
+          'Mở thư mục',
+          '<svg viewBox="0 0 24 24"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/></svg>',
+          () => ipcRenderer.send('open-download-folder', dl.savePath)
+        )
+      );
+    } else if (!dl.done) {
+      actions.appendChild(createDownloadActionButton(
+        'Huỷ',
+        '<svg viewBox="0 0 24 24"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>',
+        () => ipcRenderer.send('cancel-download', dl.id)
+      ));
+    }
 
     dlList.insertBefore(item, dlEmpty);
   });
@@ -757,7 +790,7 @@ ipcRenderer.on('download-started', (event, data) => {
     dlPanelOpen = true;
     dlPanel.style.display = 'flex';
   }
-  showDlToast(`⬇️ Bắt đầu tải: <b>${data.filename}</b>`);
+  showDlToast('Bắt đầu tải: ', data.filename);
 });
 
 ipcRenderer.on('download-progress', (event, data) => {
@@ -786,9 +819,9 @@ ipcRenderer.on('download-done', (event, data) => {
     dl.savePath = data.savePath || dl.savePath;
     renderDownloads();
     if (data.state === 'completed') {
-      showDlToast(`✅ Đã tải xong: <b>${data.filename}</b>`);
+      showDlToast('Đã tải xong: ', data.filename);
     } else {
-      showDlToast(`❌ Tải thất bại: <b>${data.filename}</b>`);
+      showDlToast('Tải thất bại: ', data.filename);
     }
   }
 });

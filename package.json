@@ -5,6 +5,8 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
+    "test:privacy": "node scripts/testPrivacy.js",
+    "test:privacy:cdp": "electron scripts/testPrivacyCdp.js",
     "build": "electron-builder --win",
     "build:portable": "electron-builder --win portable",
     "release": "electron-builder --win --publish always"
@@ -41,6 +43,7 @@
     },
     "files": [
       "main.js",
+      "privacy.js",
       "preload.js",
       "renderer.js",
       "index.html",

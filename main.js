@@ -18,11 +18,16 @@ const {
   nativeImage,
   nativeTheme,
   dialog,
-  Notification,
 } = require('electron');
 const { autoUpdater } = require('electron-updater');
 const path = require('path');
 const fs = require('fs');
+const {
+  buildPrivacyPatchScript,
+  registerPrivacyScriptForNewDocuments,
+  shouldBlockMessengerRequest,
+  shouldUseMessengerAwayMode,
+} = require('./privacy');
 
 // ============================================================
 //  HỆ THỐNG DOWNLOAD
@@ -37,7 +42,7 @@ const MESSENGER_URL = 'https://www.facebook.com/messages';
 const APP_NAME = 'Messenger';
 const APP_ID = 'com.messenger.desktop';
 const USER_AGENT =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36';
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.6261.156 Safari/537.36';
 
 // ============================================================
 //  CHỐNG CHẠY TRÙNG LẶP (Single Instance Lock)
@@ -106,7 +111,7 @@ let profileNames = {}; // { profileId: displayName }
 let browserViews = {}; // { profileId: BrowserView }
 let webContentsIntervals = new Map(); // webContents.id -> Set<Timeout>
 let webContentsProfiles = new Map(); // webContents.id -> profileId
-let profileNotificationStates = {}; // { profileId: { signature, timestamp } }
+let privacyScriptIdentifiers = new Map(); // webContents.id -> CDP script identifier
 let activeProfileId = null;
 
 // ============================================================
@@ -164,24 +169,24 @@ function createTray() {
 function updateTrayMenu() {
   if (!tray) return;
   const contextMenu = Menu.buildFromTemplate([
-    { label: '💬 Mở Messenger', click: () => showExistingInstance() },
+    { label: 'Mở Messenger', click: () => showExistingInstance() },
     { type: 'separator' },
-    { label: '🔄 Tải lại trang', click: () => {
+    { label: 'Tải lại trang', click: () => {
       if (activeProfileId && browserViews[activeProfileId]) {
         browserViews[activeProfileId].webContents.reload();
       }
     }},
-    { label: '🚀 Khởi động cùng Windows', type: 'checkbox', checked: settings.autoLaunch, click: (item) => toggleAutoLaunch(item.checked) },
-    { label: '📌 Thu nhỏ xuống Tray khi đóng', type: 'checkbox', checked: settings.minimizeToTray, click: (item) => { settings.minimizeToTray = item.checked; saveSettings(settings); } },
+    { label: 'Khởi động cùng Windows', type: 'checkbox', checked: settings.autoLaunch, click: (item) => toggleAutoLaunch(item.checked) },
+    { label: 'Thu nhỏ xuống Tray khi đóng', type: 'checkbox', checked: settings.minimizeToTray, click: (item) => { settings.minimizeToTray = item.checked; saveSettings(settings); } },
     { type: 'separator' },
-    { label: '🛡️ Bảo mật', submenu: [
+    { label: 'Bảo mật', submenu: [
         { label: 'Chặn hiển thị "Đã xem"', type: 'checkbox', checked: settings.blockSeen, click: (item) => toggleBlockSeen(item.checked) },
         { label: 'Chặn hiển thị "Đang nhập"', type: 'checkbox', checked: settings.blockTyping, click: (item) => toggleBlockTyping(item.checked) }
     ]},
     { type: 'separator' },
-    { label: '⬇️ Kiểm tra cập nhật', click: () => checkForUpdates(true) },
+    { label: 'Kiểm tra cập nhật', click: () => checkForUpdates(true) },
     { type: 'separator' },
-    { label: '❌ Thoát hoàn toàn', click: () => quitAppCompletely() },
+    { label: 'Thoát hoàn toàn', click: () => quitAppCompletely() },
   ]);
   tray.setContextMenu(contextMenu);
 }
@@ -305,24 +310,6 @@ function isMessengerAwayModeActive() {
   return !mainWindow.isVisible() || mainWindow.isMinimized();
 }
 
-function shouldNotifyUser() {
-  return isMessengerAwayModeActive();
-}
-
-function playMessageSound() {
-  try {
-    shell.beep();
-  } catch {}
-}
-
-function handleIncomingMessages(profileId, addedCount, messageInfo = null) {
-  if (shouldNotifyUser()) {
-    showMessageNotification(profileId, addedCount, messageInfo);
-  } else {
-    playMessageSound();
-  }
-}
-
 function sendProfileBadge(profileId, count) {
   if (mainWindow && !mainWindow.isDestroyed() && profileId) {
     mainWindow.webContents.send('update-profile-badge', { id: profileId, count: count || 0 });
@@ -334,17 +321,8 @@ function updateProfileUnreadCount(profileId, count, messageInfo = null) {
 
   const normalizedCount = Math.max(0, count);
   const previousCount = profileUnreadCounts[profileId];
-  if (shouldNotifyUser() && previousCount > 0 && normalizedCount === 0 && !messageInfo) {
+  if (isMessengerAwayModeActive() && previousCount > 0 && normalizedCount === 0 && !messageInfo) {
     return;
-  }
-
-  if (typeof previousCount === 'number' && normalizedCount > previousCount) {
-    const hasMessageInfo = !!(messageInfo && (messageInfo.sender || messageInfo.message));
-    const previousNotification = profileNotificationStates[profileId];
-    const hasRecentSpecificNotification = previousNotification && Date.now() - previousNotification.timestamp < 8000;
-    if (hasMessageInfo || !hasRecentSpecificNotification) {
-      handleIncomingMessages(profileId, normalizedCount - previousCount, messageInfo);
-    }
   }
 
   profileUnreadCounts[profileId] = normalizedCount;
@@ -354,52 +332,6 @@ function updateProfileUnreadCount(profileId, count, messageInfo = null) {
 function parseUnreadCountFromTitle(title) {
   const match = String(title || '').match(/\((\d+)\)/);
   return match ? parseInt(match[1], 10) : null;
-}
-
-function normalizeNotificationText(value) {
-  return String(value || '').replace(/\s+/g, ' ').trim();
-}
-
-function shouldSkipDuplicateNotification(profileId, sender, body) {
-  const signature = `${normalizeNotificationText(sender)}|${normalizeNotificationText(body)}`;
-  const now = Date.now();
-  const previous = profileNotificationStates[profileId];
-  if (previous && previous.signature === signature && now - previous.timestamp < 45000) {
-    return true;
-  }
-
-  profileNotificationStates[profileId] = { signature, timestamp: now };
-  return false;
-}
-
-function showMessageNotification(profileId, addedCount, messageInfo = null) {
-  const isNotificationSupported = typeof Notification.isSupported !== 'function' || Notification.isSupported();
-  if (!shouldNotifyUser() || !isNotificationSupported) return;
-
-  const profileName = profileNames[profileId] || 'Messenger';
-  const sender = normalizeNotificationText(messageInfo && messageInfo.sender ? messageInfo.sender : profileName);
-  const message = normalizeNotificationText(messageInfo && messageInfo.message ? messageInfo.message : '');
-  const countText = addedCount > 1 ? `${addedCount} tin nhắn mới` : 'Có tin nhắn mới';
-  const body = message || countText;
-  if (shouldSkipDuplicateNotification(profileId, sender, body)) return;
-
-  const notification = new Notification({
-    title: sender,
-    body,
-    icon: path.join(__dirname, 'icon.png'),
-    silent: false,
-  });
-
-  notification.on('click', () => {
-    restoreMainWindow();
-    if (profileId && browserViews[profileId]) {
-      activeProfileId = profileId;
-      mainWindow.setBrowserView(browserViews[profileId]);
-      updateBrowserViewBounds();
-    }
-  });
-
-  notification.show();
 }
 
 function buildMessengerAwayScript(away) {
@@ -462,80 +394,112 @@ function setAllMessengerAwayMode(away) {
 }
 
 function updateMessengerAwayMode() {
-  setAllMessengerAwayMode(isMessengerAwayModeActive());
+  setAllMessengerAwayMode(
+    shouldUseMessengerAwayMode(isMessengerAwayModeActive(), settings.blockSeen),
+  );
+  updatePagePrivacyProtection();
 }
 
-function buildMessengerNotificationBridgeScript() {
+function buildMessengerProfileAvatarScript() {
   return `
     (function() {
-      if (window.__messengerNotificationBridgeInstalled || typeof window.Notification !== 'function') return;
-      window.__messengerNotificationBridgeInstalled = true;
-
-      var NativeNotification = window.Notification;
-
-      function reportNotification(title, options) {
-        var payload = {
-          sender: String(title || ''),
-          message: String((options && options.body) || ''),
-          icon: String((options && options.icon) || '')
-        };
-
-        if (window.messengerApp && typeof window.messengerApp.reportWebNotification === 'function') {
-          window.messengerApp.reportWebNotification(payload);
-        }
-      }
-
-      function FakeNotification(title, options) {
-        reportNotification(title, options || {});
-
-        var target = new EventTarget();
-        target.title = String(title || '');
-        target.body = String((options && options.body) || '');
-        target.icon = String((options && options.icon) || '');
-        target.close = function() {
-          setTimeout(function() {
-            try { target.dispatchEvent(new Event('close')); } catch (e) {}
-          }, 0);
-        };
-
-        setTimeout(function() {
-          try { target.dispatchEvent(new Event('show')); } catch (e) {}
-          if (typeof target.onshow === 'function') target.onshow(new Event('show'));
-        }, 0);
-
-        return target;
-      }
-
-      FakeNotification.requestPermission = function(callback) {
-        var result;
+      function normalizeUrl(url) {
+        if (!url) return null;
         try {
-          result = NativeNotification.requestPermission(callback);
+          return new URL(url, location.href).href;
         } catch (e) {
-          result = Promise.resolve('granted');
-          if (typeof callback === 'function') callback('granted');
+          return null;
         }
-        return result;
-      };
+      }
 
-      Object.defineProperty(FakeNotification, 'permission', {
-        configurable: true,
-        get: function() {
-          try { return NativeNotification.permission || 'granted'; } catch (e) { return 'granted'; }
+      function isAvatarUrl(url) {
+        return !!url && (
+          url.includes('scontent') ||
+          url.includes('fbcdn') ||
+          url.includes('platform-lookaside') ||
+          url.includes('graph.facebook.com')
+        );
+      }
+
+      function imageFromElement(element) {
+        if (!element) return null;
+
+        var img = element.querySelector && element.querySelector('img[src]');
+        var src = normalizeUrl(img && img.getAttribute('src'));
+        if (isAvatarUrl(src)) return src;
+
+        var image = element.querySelector && element.querySelector('svg image');
+        var href = image && (image.getAttribute('xlink:href') || image.getAttribute('href'));
+        href = normalizeUrl(href);
+        if (isAvatarUrl(href)) return href;
+
+        var nodes = element.querySelectorAll ? element.querySelectorAll('[style*="background-image"]') : [];
+        for (var i = 0; i < nodes.length; i += 1) {
+          var style = nodes[i].getAttribute('style') || '';
+          var match = style.match(/url\\(["']?([^"')]+)["']?\\)/);
+          var bg = normalizeUrl(match && match[1]);
+          if (isAvatarUrl(bg)) return bg;
         }
-      });
 
-      try {
-        FakeNotification.prototype = NativeNotification.prototype;
-      } catch (e) {}
+        return null;
+      }
 
-      window.Notification = FakeNotification;
+      var candidates = [
+        'a[href*="/me/"]',
+        'a[aria-label*="profile" i]',
+        'a[aria-label*="trang cá nhân" i]',
+        'div[aria-label*="account" i]',
+        'div[aria-label*="tài khoản" i]',
+        'div[role="button"][aria-label*="profile" i]',
+        'div[role="button"][aria-label*="tài khoản" i]',
+        '[data-testid*="profile"]',
+        '[data-testid*="Profile"]'
+      ];
+
+      for (var c = 0; c < candidates.length; c += 1) {
+        var elements = document.querySelectorAll(candidates[c]);
+        for (var j = 0; j < elements.length; j += 1) {
+          var found = imageFromElement(elements[j]);
+          if (found) return found;
+        }
+      }
+
+      var nav = document.querySelector('[role="navigation"]');
+      if (nav) {
+        var navButtons = nav.querySelectorAll('a, div[role="button"]');
+        for (var n = 0; n < Math.min(navButtons.length, 8); n += 1) {
+          var navImage = imageFromElement(navButtons[n]);
+          if (navImage) return navImage;
+        }
+      }
+
+      return null;
     })();
   `;
 }
 
-function installMessengerNotificationBridge(contents) {
-  if (!contents || contents.isDestroyed()) return;
-  contents.executeJavaScript(buildMessengerNotificationBridgeScript()).catch(() => {});
+async function getFacebookUserId(contents) {
+  try {
+    const cookies = await contents.session.cookies.get({ name: 'c_user' });
+    return cookies && cookies.length > 0 ? cookies[0].value : null;
+  } catch {
+    return null;
+  }
+}
+
+async function resolveProfileAvatar(contents) {
+  const uid = await getFacebookUserId(contents);
+
+  try {
+    const domAvatar = await contents.executeJavaScript(buildMessengerProfileAvatarScript());
+    if (domAvatar) return domAvatar;
+  } catch {}
+
+  if (uid) {
+    return `https://graph.facebook.com/${uid}/picture?type=large&redirect=true`;
+  }
+
+  return null;
 }
 
 function buildMessengerUnreadObserverScript() {
@@ -712,14 +676,53 @@ function installMessengerUnreadObserver(contents) {
   contents.executeJavaScript(buildMessengerUnreadObserverScript()).catch(() => {});
 }
 
+const privacyRequestSessions = new WeakSet();
+
+function getPrivacySettings() {
+  return {
+    blockSeen: settings.blockSeen || isMessengerAwayModeActive(),
+    blockTyping: settings.blockTyping,
+  };
+}
+
+function setupPrivacyRequestBlocker(sess) {
+  if (!sess || privacyRequestSessions.has(sess)) return;
+  privacyRequestSessions.add(sess);
+
+  sess.webRequest.onBeforeRequest(
+    { urls: ['*://*.facebook.com/*', '*://*.messenger.com/*'] },
+    (details, callback) => {
+      const body = (details.uploadData || [])
+        .map((part) => part.bytes ? part.bytes.toString('utf8') : '')
+        .join('');
+      callback({
+        cancel: shouldBlockMessengerRequest(details.url, body, getPrivacySettings()),
+      });
+    },
+  );
+}
+
+function updatePagePrivacyProtection() {
+  const privacySettings = getPrivacySettings();
+  Object.values(browserViews).forEach((view) => {
+    const contents = view?.webContents;
+    if (!contents || contents.isDestroyed()) return;
+    registerPrivacyScript(contents, privacySettings);
+    contents.send('privacy-settings-updated', privacySettings);
+    contents.executeJavaScript(buildPrivacyPatchScript(privacySettings)).catch(() => {});
+  });
+}
+
 function toggleBlockSeen(enable) {
   settings.blockSeen = enable;
   saveSettings(settings);
+  updateMessengerAwayMode();
 }
 
 function toggleBlockTyping(enable) {
   settings.blockTyping = enable;
   saveSettings(settings);
+  updatePagePrivacyProtection();
 }
 
 // ============================================================
@@ -825,7 +828,7 @@ function setupDownloadHandler(sess) {
 
   sess.on('will-download', (event, item, webContents) => {
     const id = ++downloadCounter;
-    const filename = item.getFilename() || 'download';
+    const filename = path.basename(item.getFilename() || 'download') || 'download';
     const downloadsPath = app.getPath('downloads');
     const savePath = path.join(downloadsPath, filename);
     item.setSavePath(savePath);
@@ -863,21 +866,64 @@ function setupDownloadHandler(sess) {
   });
 }
 
-function isMessengerUrl(url) {
+const MESSENGER_HOSTS = ['facebook.com', 'messenger.com', 'fbcdn.net'];
+
+function isAllowedHttpsHost(url, hosts) {
   if (!url) return false;
-  if (url === 'about:blank' || url.startsWith('about:blank#')) return true;
 
   try {
     const parsed = new URL(url);
+    if (parsed.protocol !== 'https:') return false;
     const host = parsed.hostname.toLowerCase();
-    return (
-      host === 'facebook.com' ||
-      host.endsWith('.facebook.com') ||
-      host === 'messenger.com' ||
-      host.endsWith('.messenger.com') ||
-      host === 'fbcdn.net' ||
-      host.endsWith('.fbcdn.net')
-    );
+    return hosts.some((allowedHost) => host === allowedHost || host.endsWith(`.${allowedHost}`));
+  } catch {
+    return false;
+  }
+}
+
+function isMessengerUrl(url) {
+  if (!url) return false;
+  if (url === 'about:blank' || url.startsWith('about:blank#')) return true;
+  return isAllowedHttpsHost(url, MESSENGER_HOSTS);
+}
+
+function isOAuthPopupUrl(url) {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'https:') return false;
+
+    const host = parsed.hostname.toLowerCase();
+    if (host === 'accounts.google.com' || host.endsWith('.accounts.google.com')) return true;
+    if (host === 'appleid.apple.com' || host.endsWith('.appleid.apple.com')) return true;
+
+    const isGoogleHost = host === 'google.com' || host.endsWith('.google.com');
+    if (isGoogleHost) {
+      return /^\/(oauth2|accounts|signin)(\/|$)/.test(parsed.pathname);
+    }
+
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+function isInAppPopupUrl(url) {
+  return isMessengerUrl(url) || isOAuthPopupUrl(url);
+}
+
+function isMessengerLoginCompleteUrl(url) {
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.toLowerCase();
+    const isFacebookHost = host === 'facebook.com' || host.endsWith('.facebook.com');
+    const isMessengerHost = host === 'messenger.com' || host.endsWith('.messenger.com');
+    if (!isFacebookHost && !isMessengerHost) return false;
+
+    const pathname = parsed.pathname.replace(/\/+$/, '') || '/';
+    if (isMessengerHost) {
+      return pathname === '/' || pathname.startsWith('/t') || pathname.startsWith('/messages');
+    }
+    return pathname === '/' || pathname.startsWith('/messages');
   } catch {
     return false;
   }
@@ -890,6 +936,36 @@ function isExternalWebUrl(url) {
   } catch {
     return false;
   }
+}
+
+async function registerPrivacyScript(contents, privacySettings = getPrivacySettings()) {
+  if (!contents || contents.isDestroyed()) return null;
+
+  try {
+    const previousIdentifier = privacyScriptIdentifiers.get(contents.id) || null;
+    const identifier = await registerPrivacyScriptForNewDocuments(
+      contents.debugger,
+      privacySettings,
+      previousIdentifier,
+    );
+    if (identifier) {
+      if (!previousIdentifier) {
+        contents.once('destroyed', () => privacyScriptIdentifiers.delete(contents.id));
+      }
+      privacyScriptIdentifiers.set(contents.id, identifier);
+    }
+    return identifier;
+  } catch {
+    return null;
+  }
+}
+
+async function preparePrivacyScript(contents) {
+  if (!contents || contents.isDestroyed()) return null;
+  if (!contents.getURL()) {
+    await contents.loadURL('about:blank');
+  }
+  return registerPrivacyScript(contents);
 }
 
 function getMessengerPopupOptions(partition) {
@@ -920,9 +996,10 @@ function setupWebContents(contents, profileId, partition, options = {}) {
 
   // Setup download handler for this view's session
   setupDownloadHandler(contents.session);
+  setupPrivacyRequestBlocker(contents.session);
 
   contents.setWindowOpenHandler(({ url }) => {
-    if (isMessengerUrl(url)) {
+    if (isInAppPopupUrl(url)) {
       return {
         action: 'allow',
         overrideBrowserWindowOptions: getMessengerPopupOptions(partition),
@@ -935,10 +1012,26 @@ function setupWebContents(contents, profileId, partition, options = {}) {
     return { action: 'deny' };
   });
 
-  contents.on('did-create-window', (childWindow) => {
+  contents.on('did-create-window', async (childWindow) => {
     const childContents = childWindow.webContents;
     childContents.setUserAgent(USER_AGENT);
-    setupWebContents(childContents, profileId, partition, { skipMessengerPolling: true });
+    await setupWebContents(childContents, profileId, partition, { skipMessengerPolling: true });
+
+    let sawOAuthHost = false;
+    const closeCompletedOAuthPopup = (navUrl) => {
+      if (isOAuthPopupUrl(navUrl)) {
+        sawOAuthHost = true;
+        return;
+      }
+      if (!sawOAuthHost || !isMessengerLoginCompleteUrl(navUrl)) return;
+      contents.loadURL(MESSENGER_URL, { userAgent: USER_AGENT });
+      setTimeout(() => {
+        if (!childWindow.isDestroyed()) childWindow.close();
+      }, 500);
+    };
+
+    childContents.on('did-navigate', (event, navUrl) => closeCompletedOAuthPopup(navUrl));
+    childContents.on('did-redirect-navigation', (event, navUrl) => closeCompletedOAuthPopup(navUrl));
   });
 
   contents.on('context-menu', (event, params) => {
@@ -949,24 +1042,24 @@ function setupWebContents(contents, profileId, partition, options = {}) {
       }
       if (params.dictionarySuggestions.length > 0) menu.append(new MenuItem({ type: 'separator' }));
     }
-    if (params.selectionText) menu.append(new MenuItem({ label: '📋 Sao chép', role: 'copy' }));
+    if (params.selectionText) menu.append(new MenuItem({ label: 'Sao chép', role: 'copy' }));
     if (params.isEditable) {
-      menu.append(new MenuItem({ label: '📋 Dán', role: 'paste' }));
-      menu.append(new MenuItem({ label: '✂️ Cắt', role: 'cut' }));
-      menu.append(new MenuItem({ label: '📝 Chọn tất cả', role: 'selectAll' }));
+      menu.append(new MenuItem({ label: 'Dán', role: 'paste' }));
+      menu.append(new MenuItem({ label: 'Cắt', role: 'cut' }));
+      menu.append(new MenuItem({ label: 'Chọn tất cả', role: 'selectAll' }));
     }
     if (params.linkURL) {
       menu.append(new MenuItem({ type: 'separator' }));
-      menu.append(new MenuItem({ label: '🔗 Mở liên kết', click: () => shell.openExternal(params.linkURL) }));
-      menu.append(new MenuItem({ label: '📋 Sao chép liên kết', click: () => require('electron').clipboard.writeText(params.linkURL) }));
+      menu.append(new MenuItem({ label: 'Mở liên kết', click: () => shell.openExternal(params.linkURL) }));
+      menu.append(new MenuItem({ label: 'Sao chép liên kết', click: () => require('electron').clipboard.writeText(params.linkURL) }));
     }
     if (params.mediaType === 'image') {
       menu.append(new MenuItem({ type: 'separator' }));
-      menu.append(new MenuItem({ label: '💾 Lưu ảnh', click: () => contents.downloadURL(params.srcURL) }));
+      menu.append(new MenuItem({ label: 'Lưu ảnh', click: () => contents.downloadURL(params.srcURL) }));
     }
     menu.append(new MenuItem({ type: 'separator' }));
-    menu.append(new MenuItem({ label: '🔄 Tải lại trang', click: () => contents.reload() }));
-    menu.append(new MenuItem({ label: '◀️ Quay lại', enabled: contents.canGoBack(), click: () => contents.goBack() }));
+    menu.append(new MenuItem({ label: 'Tải lại trang', click: () => contents.reload() }));
+    menu.append(new MenuItem({ label: 'Quay lại', enabled: contents.canGoBack(), click: () => contents.goBack() }));
     if (menu.items.length > 0) menu.popup({ window: mainWindow });
   });
 
@@ -976,8 +1069,11 @@ function setupWebContents(contents, profileId, partition, options = {}) {
       const cssData = fs.readFileSync(cssPath, 'utf8');
       contents.insertCSS(cssData);
     } catch(e) {}
-    setWebContentsAwayMode(contents, isMessengerAwayModeActive());
-    installMessengerNotificationBridge(contents);
+    setWebContentsAwayMode(
+      contents,
+      shouldUseMessengerAwayMode(isMessengerAwayModeActive(), settings.blockSeen),
+    );
+    contents.executeJavaScript(buildPrivacyPatchScript(getPrivacySettings())).catch(() => {});
     installMessengerUnreadObserver(contents);
   });
 
@@ -995,13 +1091,9 @@ function setupWebContents(contents, profileId, partition, options = {}) {
       return;
     }
     try {
-      const cookies = await contents.session.cookies.get({ name: 'c_user' });
-      if (cookies && cookies.length > 0) {
-        const uid = cookies[0].value;
-        const fbAvatar = `https://graph.facebook.com/${uid}/picture?width=150&height=150`;
-        if (mainWindow && profileId) {
-          mainWindow.webContents.send('update-profile-avatar', { id: profileId, avatarUrl: fbAvatar });
-        }
+      const avatarUrl = await resolveProfileAvatar(contents);
+      if (avatarUrl && mainWindow && profileId) {
+        mainWindow.webContents.send('update-profile-avatar', { id: profileId, avatarUrl });
       }
     } catch(e) {}
   }, 5000);
@@ -1044,6 +1136,8 @@ function setupWebContents(contents, profileId, partition, options = {}) {
       if (input.key === 'F12' || (input.control && input.shift && input.key === 'I')) contents.toggleDevTools();
     });
   }
+
+  return preparePrivacyScript(contents);
 }
 
 // ============================================================
@@ -1076,44 +1170,14 @@ function createWindow() {
     // Setup download handler on every new session
     setupDownloadHandler(sess);
 
-    sess.webRequest.onBeforeRequest({ urls: ['*://*.facebook.com/*', '*://*.messenger.com/*'] }, (details, callback) => {
-      let cancel = false;
-      
-      // Chặn Đã xem (Block Seen)
-      if (settings.blockSeen || isMessengerAwayModeActive()) {
-        if (details.url.includes('/change_read_status.php') || details.url.includes('/ajax/mercury/change_read_status.php')) {
-          cancel = true;
-        }
-        if (details.uploadData && details.uploadData.length > 0) {
-          const body = details.uploadData[0].bytes ? details.uploadData[0].bytes.toString() : '';
-          if (body.includes('LSThreadMarkRead') || body.includes('markThreadRead') || body.includes('ThreadMarkReadMutation') || body.includes('"name":"mark_read"')) {
-            cancel = true;
-          }
-        }
-      }
-
-      // Chặn Đang nhập (Block Typing)
-      if (settings.blockTyping) {
-        if (details.url.includes('/typ.php') || details.url.includes('/ajax/messaging/typ.php')) {
-          cancel = true;
-        }
-        if (details.uploadData && details.uploadData.length > 0) {
-          const body = details.uploadData[0].bytes ? details.uploadData[0].bytes.toString() : '';
-          if (body.includes('TypingIndicator') || body.includes('LSTypingIndicator') || body.includes('typing_indicator')) {
-            cancel = true;
-          }
-        }
-      }
-
-      callback({ cancel });
-    });
+    setupPrivacyRequestBlocker(sess);
 
     sess.setPermissionRequestHandler((webContents, permission, callback, details = {}) => {
       const currentUrl = webContents.getURL();
       const requestingUrl = details.requestingUrl || details.securityOrigin || details.embeddingOrigin || currentUrl;
       if (isMessengerUrl(currentUrl) || isMessengerUrl(requestingUrl)) {
         const allowedPermissions = [
-          'notifications', 'media', 'mediaKeySystem', 'microphone', 
+          'media', 'mediaKeySystem', 'microphone',
           'camera', 'clipboard-read', 'clipboard-sanitized-write',
         ];
         if (allowedPermissions.includes(permission)) {
@@ -1127,6 +1191,9 @@ function createWindow() {
     sess.setPermissionCheckHandler((webContents, permission, requestingOrigin, details = {}) => {
       const currentUrl = webContents?.getURL() || '';
       const requestingUrl = requestingOrigin || details.requestingUrl || details.securityOrigin || details.embeddingOrigin || currentUrl;
+      if (permission === 'notifications') {
+        return false;
+      }
       if (isMessengerUrl(currentUrl) || isMessengerUrl(requestingUrl)) {
         return true;
       }
@@ -1172,7 +1239,7 @@ function createWindow() {
   });
 
   // IPC
-  ipcMain.on('switch-profile', (event, profile) => {
+  ipcMain.on('switch-profile', async (event, profile) => {
     activeProfileId = profile.id;
     profileNames[profile.id] = profile.name || 'Messenger';
     if (!browserViews[profile.id]) {
@@ -1185,8 +1252,8 @@ function createWindow() {
         }
       });
       browserViews[profile.id] = view;
-      setupWebContents(view.webContents, profile.id, profile.partition);
-      view.webContents.loadURL(MESSENGER_URL, { userAgent: USER_AGENT });
+      await setupWebContents(view.webContents, profile.id, profile.partition);
+      await view.webContents.loadURL(MESSENGER_URL, { userAgent: USER_AGENT });
     }
     mainWindow.setBrowserView(browserViews[profile.id]);
     updateBrowserViewBounds();
@@ -1221,8 +1288,8 @@ function createWindow() {
         }
       });
       browserViews[id] = view;
-      setupWebContents(view.webContents, id, partition);
-      view.webContents.loadURL(MESSENGER_URL, { userAgent: USER_AGENT });
+      await setupWebContents(view.webContents, id, partition);
+      await view.webContents.loadURL(MESSENGER_URL, { userAgent: USER_AGENT });
 
       // 4. Hiển thị lại
       if (activeProfileId === id) {
@@ -1290,22 +1357,6 @@ function createWindow() {
     }
   });
 
-  ipcMain.on('messenger-web-notification', (event, data = {}) => {
-    const profileId = webContentsProfiles.get(event.sender.id);
-    if (!profileId) return;
-
-    const messageInfo = {
-      sender: normalizeNotificationText(data.sender) || (profileNames[profileId] || 'Messenger'),
-      message: normalizeNotificationText(data.message),
-    };
-
-    if (shouldNotifyUser()) {
-      showMessageNotification(profileId, 1, messageInfo);
-    } else {
-      playMessageSound();
-    }
-  });
-
   ipcMain.on('set-theme', (event, isDark) => {
     settings.isDarkMode = isDark;
     saveSettings(settings);
@@ -1360,6 +1411,8 @@ function createWindow() {
     event.returnValue = {
       isDarkMode: settings.isDarkMode,
       alwaysOnTop: settings.alwaysOnTop,
+      blockSeen: settings.blockSeen,
+      blockTyping: settings.blockTyping,
       appLockEnabled: settings.appLockEnabled,
       appLockHash: settings.appLockHash,
       appLockTimeout: settings.appLockTimeout,
