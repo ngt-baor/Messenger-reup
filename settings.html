@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self';">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Cài đặt Messenger</title>
+  <link rel="stylesheet" href="settings.css">
+</head>
+<body>
+  <main class="settings-shell">
+    <header class="settings-header">
+      <img class="app-icon" src="icon.ico" alt="">
+      <div class="header-copy">
+        <h1>Cài đặt</h1>
+        <p>Messenger dành cho Windows</p>
+      </div>
+      <span id="version-text" class="version-text">v...</span>
+    </header>
+
+    <section class="settings-section" aria-labelledby="application-heading">
+      <h2 id="application-heading">Ứng dụng</h2>
+      <div class="setting-list">
+        <label class="setting-row">
+          <span class="setting-copy">
+            <strong>Khởi động cùng Windows</strong>
+            <small>Mở Messenger khi bạn đăng nhập Windows.</small>
+          </span>
+          <span class="switch">
+            <input id="auto-launch" type="checkbox">
+            <span class="switch-track" aria-hidden="true"></span>
+          </span>
+        </label>
+        <label class="setting-row">
+          <span class="setting-copy">
+            <strong>Thu nhỏ xuống Tray khi đóng</strong>
+            <small>Tiếp tục chạy Messenger ở chế độ nền.</small>
+          </span>
+          <span class="switch">
+            <input id="minimize-to-tray" type="checkbox">
+            <span class="switch-track" aria-hidden="true"></span>
+          </span>
+        </label>
+        <label class="setting-row">
+          <span class="setting-copy">
+            <strong>Giảm RAM profile nền</strong>
+            <small>Tạm dừng profile không sử dụng.</small>
+          </span>
+          <span class="switch">
+            <input id="sleep-background" type="checkbox">
+            <span class="switch-track" aria-hidden="true"></span>
+          </span>
+        </label>
+      </div>
+    </section>
+
+    <section class="settings-section" aria-labelledby="privacy-heading">
+      <h2 id="privacy-heading">Quyền riêng tư</h2>
+      <div class="setting-list">
+        <label class="setting-row">
+          <span class="setting-copy">
+            <strong>Chặn trạng thái "Đã xem"</strong>
+            <small>Không gửi xác nhận đã đọc tin nhắn.</small>
+          </span>
+          <span class="switch">
+            <input id="block-seen" type="checkbox">
+            <span class="switch-track" aria-hidden="true"></span>
+          </span>
+        </label>
+        <label class="setting-row">
+          <span class="setting-copy">
+            <strong>Chặn trạng thái "Đang nhập"</strong>
+            <small>Ẩn trạng thái gõ phím với người khác.</small>
+          </span>
+          <span class="switch">
+            <input id="block-typing" type="checkbox">
+            <span class="switch-track" aria-hidden="true"></span>
+          </span>
+        </label>
+      </div>
+    </section>
+
+    <section class="settings-section" aria-labelledby="update-heading">
+      <div class="section-heading">
+        <div>
+          <h2 id="update-heading">Cập nhật</h2>
+          <p id="update-status" class="status-text">Đang kiểm tra trạng thái cập nhật...</p>
+        </div>
+        <span id="update-badge" class="status-badge">Sẵn sàng</span>
+      </div>
+      <div id="update-progress" class="progress-track" hidden>
+        <span id="update-progress-bar"></span>
+      </div>
+      <button id="update-action" class="primary-btn" type="button">Kiểm tra cập nhật</button>
+    </section>
+
+    <section class="settings-section" aria-labelledby="cleanup-heading">
+      <div class="section-heading data-heading">
+        <div>
+          <h2 id="cleanup-heading">Dữ liệu ứng dụng</h2>
+          <p class="status-text">Giải phóng bộ nhớ tạm hoặc mở thư mục log.</p>
+        </div>
+        <button id="open-user-data" class="text-btn" type="button">Mở thư mục</button>
+      </div>
+      <div class="button-grid">
+        <button id="clear-cache" type="button">Dọn cache</button>
+        <button id="clear-session" class="danger-btn" type="button">Dọn cache và đăng xuất</button>
+      </div>
+    </section>
+  </main>
+
+  <script src="settings-renderer.js"></script>
+</body>
+</html>

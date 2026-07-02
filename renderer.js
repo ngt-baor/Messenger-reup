@@ -335,6 +335,7 @@ document.getElementById('btn-pin').onclick = () => {
 document.getElementById('btn-reload').onclick = () => ipcRenderer.send('reload-page');
 document.getElementById('btn-home').onclick = () => ipcRenderer.send('go-home');
 document.getElementById('btn-back').onclick = () => ipcRenderer.send('go-back');
+document.getElementById('btn-settings').onclick = () => ipcRenderer.send('open-settings');
 document.getElementById('btn-j2team').onclick = () => {
   require('electron').shell.openExternal('https://chromewebstore.google.com/detail/j2team-security/hmlcjjclebjnfohgmgikjfnbmfkigocc');
 };

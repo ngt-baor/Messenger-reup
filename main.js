@@ -108,6 +108,7 @@ function saveSettings(data) {
 // ============================================================
 let mainWindow = null;
 let tray = null;
+let settingsWindow = null;
 let settings = loadSettings();
 let isQuitting = false;
 let unreadCount = 0;
@@ -183,45 +184,81 @@ function createTray() {
 
 function updateTrayMenu() {
   if (!tray) return;
-  const updateLabel = updateTrayState.downloaded
-    ? `Cài bản cập nhật v${updateTrayState.version}`
-    : (updateTrayState.available
-      ? `Tải bản cập nhật v${updateTrayState.version}`
-      : 'Kiểm tra cập nhật');
   const contextMenu = Menu.buildFromTemplate([
     { label: 'Mở Messenger', click: () => showExistingInstance() },
-    { label: `Phiên bản hiện tại: ${app.getVersion()}`, enabled: false },
-    updateTrayState.available || updateTrayState.downloaded
-      ? { label: `Có bản mới: v${updateTrayState.version}`, enabled: false }
-      : { label: 'Chưa có thông tin cập nhật mới', enabled: false },
-    { type: 'separator' },
     { label: 'Tải lại trang', click: () => {
       if (activeProfileId && browserViews[activeProfileId]) {
         browserViews[activeProfileId].webContents.reload();
       }
     }},
-    { label: 'Khởi động cùng Windows', type: 'checkbox', checked: settings.autoLaunch, click: (item) => toggleAutoLaunch(item.checked) },
-    { label: 'Thu nhỏ xuống Tray khi đóng', type: 'checkbox', checked: settings.minimizeToTray, click: (item) => { settings.minimizeToTray = item.checked; saveSettings(settings); } },
-    { label: 'Sleep profile nền để giảm RAM', type: 'checkbox', checked: !!settings.sleepBackgroundProfiles, click: (item) => toggleBackgroundProfileSleep(item.checked) },
-    { label: 'Dọn cache', submenu: [
-        { label: 'Chỉ dọn cache', click: () => clearAppCache(false) },
-        { label: 'Dọn cache và đăng xuất tất cả', click: () => clearAppCache(true) },
-    ]},
+    { label: 'Cài đặt', click: () => showSettingsWindow() },
     { type: 'separator' },
-    { label: 'Bảo mật', submenu: [
-        { label: 'Chặn hiển thị "Đã xem"', type: 'checkbox', checked: settings.blockSeen, click: (item) => toggleBlockSeen(item.checked) },
-        { label: 'Chặn hiển thị "Đang nhập"', type: 'checkbox', checked: settings.blockTyping, click: (item) => toggleBlockTyping(item.checked) }
-    ]},
-    { type: 'separator' },
-    { label: updateLabel, click: () => {
-      if (updateTrayState.downloaded) installDownloadedUpdate();
-      else if (updateTrayState.available) startUpdateDownload();
-      else checkForUpdates(true);
-    }},
-    { type: 'separator' },
-    { label: 'Thoát hoàn toàn', click: () => quitAppCompletely() },
+    { label: 'Thoát', click: () => quitAppCompletely() },
   ]);
   tray.setContextMenu(contextMenu);
+  tray.setToolTip(buildTrayTooltip());
+}
+
+function getSettingsPanelState() {
+  return {
+    appName: APP_NAME,
+    version: app.getVersion(),
+    update: {
+      ...updateTrayState,
+      downloading: isUpdateDownloadActive,
+    },
+    settings: {
+      autoLaunch: !!settings.autoLaunch,
+      minimizeToTray: !!settings.minimizeToTray,
+      sleepBackgroundProfiles: !!settings.sleepBackgroundProfiles,
+      blockSeen: !!settings.blockSeen,
+      blockTyping: !!settings.blockTyping,
+    },
+  };
+}
+
+function sendSettingsPanelState() {
+  if (!settingsWindow || settingsWindow.isDestroyed()) return;
+  settingsWindow.webContents.send('settings-state-updated', getSettingsPanelState());
+}
+
+function showSettingsWindow() {
+  if (settingsWindow && !settingsWindow.isDestroyed()) {
+    settingsWindow.show();
+    settingsWindow.focus();
+    sendSettingsPanelState();
+    return;
+  }
+
+  settingsWindow = new BrowserWindow({
+    width: 500,
+    height: 650,
+    resizable: false,
+    minimizable: false,
+    maximizable: false,
+    title: 'Cài đặt Messenger',
+    parent: mainWindow || undefined,
+    modal: false,
+    show: false,
+    backgroundColor: nativeTheme.shouldUseDarkColors ? '#242526' : '#ffffff',
+    icon: path.join(__dirname, 'icon.ico'),
+    webPreferences: {
+      preload: path.join(__dirname, 'settings-preload.js'),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+
+  settingsWindow.setMenu(null);
+  settingsWindow.loadFile(path.join(__dirname, 'settings.html'));
+  settingsWindow.once('ready-to-show', () => {
+    if (!settingsWindow || settingsWindow.isDestroyed()) return;
+    settingsWindow.show();
+    sendSettingsPanelState();
+  });
+  settingsWindow.on('closed', () => {
+    settingsWindow = null;
+  });
 }
 
 function trackWebContentsInterval(contents, intervalId) {
@@ -391,6 +428,7 @@ function toggleBackgroundProfileSleep(enable) {
     Object.keys(browserViews).forEach((profileId) => scheduleProfileSleep(profileId));
   }
   updateTrayMenu();
+  sendSettingsPanelState();
 }
 
 function saveWindowBounds() {
@@ -1032,12 +1070,14 @@ function toggleBlockSeen(enable) {
   settings.blockSeen = enable;
   saveSettings(settings);
   updateMessengerAwayMode();
+  sendSettingsPanelState();
 }
 
 function toggleBlockTyping(enable) {
   settings.blockTyping = enable;
   saveSettings(settings);
   updatePagePrivacyProtection();
+  sendSettingsPanelState();
 }
 
 // ============================================================
@@ -1077,6 +1117,7 @@ function setUpdateTrayState(nextState = {}) {
     ...nextState,
   };
   updateTrayMenu();
+  sendSettingsPanelState();
   if (tray) {
     tray.setToolTip(buildTrayTooltip());
   }
@@ -1238,6 +1279,8 @@ function toggleAutoLaunch(enable) {
   settings.autoLaunch = enable;
   saveSettings(settings);
   app.setLoginItemSettings({ openAtLogin: enable, path: app.getPath('exe') });
+  updateTrayMenu();
+  sendSettingsPanelState();
 }
 
 // ============================================================
@@ -1749,6 +1792,46 @@ function createWindow() {
   });
 
   // ── Đăng xuất / Xóa session cho 1 profile ──
+  ipcMain.handle('settings:get-state', () => getSettingsPanelState());
+  ipcMain.on('open-settings', () => showSettingsWindow());
+
+  ipcMain.handle('settings:set-option', (event, { key, value } = {}) => {
+    const enabled = !!value;
+    if (key === 'autoLaunch') {
+      toggleAutoLaunch(enabled);
+    } else if (key === 'minimizeToTray') {
+      settings.minimizeToTray = enabled;
+      saveSettings(settings);
+      updateTrayMenu();
+      sendSettingsPanelState();
+    } else if (key === 'sleepBackgroundProfiles') {
+      toggleBackgroundProfileSleep(enabled);
+    } else if (key === 'blockSeen') {
+      toggleBlockSeen(enabled);
+    } else if (key === 'blockTyping') {
+      toggleBlockTyping(enabled);
+    }
+    return getSettingsPanelState();
+  });
+
+  ipcMain.handle('settings:clear-cache', async (event, { clearSessionData = false } = {}) => {
+    await clearAppCache(!!clearSessionData);
+    sendSettingsPanelState();
+    return getSettingsPanelState();
+  });
+
+  ipcMain.handle('settings:update-action', () => {
+    if (updateTrayState.downloaded) installDownloadedUpdate();
+    else if (updateTrayState.available) startUpdateDownload();
+    else checkForUpdates(true);
+    sendSettingsPanelState();
+    return getSettingsPanelState();
+  });
+
+  ipcMain.handle('settings:open-user-data', () => {
+    shell.openPath(app.getPath('userData'));
+  });
+
   ipcMain.on('logout-profile', async (event, profileData) => {
     const { id, partition } = profileData;
     if (profileData.name) profileNames[id] = profileData.name;

@@ -1,6 +1,6 @@
 {
   "name": "messenger",
-  "version": "1.1.4",
+  "version": "1.1.5",
   "description": "Ứng dụng Messenger Desktop cho Windows - Chạy trên nhân Chrome (Chromium)",
   "main": "main.js",
   "scripts": {
@@ -46,8 +46,12 @@
       "main.js",
       "privacy.js",
       "preload.js",
+      "settings-preload.js",
       "renderer.js",
+      "settings-renderer.js",
       "index.html",
+      "settings.html",
+      "settings.css",
       "custom_style.css",
       "icon.ico",
       "icon.png",
