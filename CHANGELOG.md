@@ -1,5 +1,16 @@
 # Changelog
 
+## Messenger v1.2.0
+
+- Thêm multi-service: Messenger + Discord (web + cookie/partition).
+- Nút **M / D** trên thanh công cụ phải; list tài khoản lọc theo dịch vụ đang chọn.
+- Mặc định chỉ giữ view 1 dịch vụ (tiết kiệm RAM); setting “Chỉ chạy 1 dịch vụ” để bật/tắt.
+- Privacy chặn seen/typing **chỉ** áp dụng Messenger, không inject Discord.
+- Preload gắn `--mp-service=` để Discord partition không nhận privacy patch.
+- Empty state khi service chưa có nick; host Discord + hCaptcha mở rộng cho login.
+- Migrate profile cũ: gán `service: messenger` tự động.
+- Tách `service-model.js` + `npm run test:service`; README hướng dẫn multi Discord / pack.
+
 ## Messenger v1.1.4
 
 - Thêm menu dọn cache để giảm dung lượng và xử lý lỗi session/tải trang.

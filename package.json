@@ -1,16 +1,22 @@
 {
   "name": "messenger",
-  "version": "1.1.5",
-  "description": "Ứng dụng Messenger Desktop cho Windows - Chạy trên nhân Chrome (Chromium)",
+  "version": "1.2.0",
+  "description": "Messenger + Discord multi-account desktop for Windows (Electron/Chromium)",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
+    "test": "npm run test:privacy && npm run test:service",
     "test:privacy": "node scripts/testPrivacy.js",
     "test:privacy:cdp": "electron scripts/testPrivacyCdp.js",
+    "test:service": "node scripts/testServiceModel.js",
     "test:update-ui": "electron scripts/testUpdateProgressUi.js",
     "build": "electron-builder --win",
     "build:portable": "electron-builder --win portable",
-    "release": "electron-builder --win --publish always"
+    "pack": "node scripts/release-build.js",
+    "pack:portable": "node scripts/release-build.js --portable",
+    "pack:clean": "node scripts/release-build.js --clean",
+    "release": "node scripts/release-build.js --publish",
+    "release:raw": "electron-builder --win --publish always"
   },
   "build": {
     "appId": "com.messenger.desktop",
@@ -45,6 +51,7 @@
     "files": [
       "main.js",
       "privacy.js",
+      "service-model.js",
       "preload.js",
       "settings-preload.js",
       "renderer.js",

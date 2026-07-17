@@ -8,6 +8,7 @@ const fields = {
   autoLaunch: document.getElementById('auto-launch'),
   minimizeToTray: document.getElementById('minimize-to-tray'),
   sleepBackground: document.getElementById('sleep-background'),
+  exclusiveService: document.getElementById('exclusive-service'),
   blockSeen: document.getElementById('block-seen'),
   blockTyping: document.getElementById('block-typing'),
   clearCache: document.getElementById('clear-cache'),
@@ -19,6 +20,7 @@ const optionMap = new Map([
   [fields.autoLaunch, 'autoLaunch'],
   [fields.minimizeToTray, 'minimizeToTray'],
   [fields.sleepBackground, 'sleepBackgroundProfiles'],
+  [fields.exclusiveService, 'exclusiveService'],
   [fields.blockSeen, 'blockSeen'],
   [fields.blockTyping, 'blockTyping'],
 ]);
@@ -31,6 +33,7 @@ function renderState(state = {}) {
   fields.autoLaunch.checked = !!settings.autoLaunch;
   fields.minimizeToTray.checked = !!settings.minimizeToTray;
   fields.sleepBackground.checked = !!settings.sleepBackgroundProfiles;
+  fields.exclusiveService.checked = settings.exclusiveService !== false;
   fields.blockSeen.checked = !!settings.blockSeen;
   fields.blockTyping.checked = !!settings.blockTyping;
 

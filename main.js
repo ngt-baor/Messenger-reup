@@ -31,6 +31,17 @@ const {
   shouldBlockMessengerWebSocketSend,
   shouldUseMessengerAwayMode,
 } = require('./privacy');
+const {
+  SERVICE_MESSENGER,
+  SERVICE_DISCORD,
+  normalizeService,
+  getOtherService,
+  getServiceHomeUrl,
+  getServiceUserAgent,
+  isDiscordHost,
+  isDiscordAuxHost,
+  applyMultiServiceSettings,
+} = require('./service-model');
 
 // ============================================================
 //  HỆ THỐNG DOWNLOAD
@@ -42,11 +53,21 @@ let downloadCounter = 0;
 // ============================================================
 //  CẤU HÌNH CHUNG
 // ============================================================
-const MESSENGER_URL = 'https://www.facebook.com/messages';
 const APP_NAME = 'Messenger';
 const APP_ID = 'com.messenger.desktop';
-const USER_AGENT =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.6261.156 Safari/537.36';
+
+/** webPreferences shared by profile BrowserViews / popups */
+function getPartitionWebPreferences(partition, service) {
+  const svc = normalizeService(service);
+  return {
+    partition,
+    preload: path.join(__dirname, 'preload.js'),
+    contextIsolation: true,
+    nodeIntegration: false,
+    spellcheck: false,
+    additionalArguments: [`--mp-service=${svc}`],
+  };
+}
 
 // ============================================================
 //  CHỐNG CHẠY TRÙNG LẶP (Single Instance Lock)
@@ -86,20 +107,31 @@ const DEFAULT_SETTINGS = {
   appLockTimeout: 5,
   sleepBackgroundProfiles: true,
   backgroundSleepMinutes: 10,
+  // Multi-service (Discord MVP) — exclusiveService default ON (tiết kiệm RAM)
+  activeService: SERVICE_MESSENGER,
+  lastProfileByService: {
+    messenger: null,
+    discord: null,
+  },
+  exclusiveService: true,
 };
+
+function normalizeSettings(raw = {}) {
+  return applyMultiServiceSettings(raw, { ...DEFAULT_SETTINGS, ...raw });
+}
 
 function loadSettings() {
   try {
     const data = fs.readFileSync(SETTINGS_PATH, 'utf8');
-    return { ...DEFAULT_SETTINGS, ...JSON.parse(data) };
+    return normalizeSettings(JSON.parse(data));
   } catch {
-    return { ...DEFAULT_SETTINGS };
+    return normalizeSettings({});
   }
 }
 
 function saveSettings(data) {
   try {
-    fs.writeFileSync(SETTINGS_PATH, JSON.stringify(data, null, 2), 'utf8');
+    fs.writeFileSync(SETTINGS_PATH, JSON.stringify(normalizeSettings(data), null, 2), 'utf8');
   } catch (err) {}
 }
 
@@ -115,6 +147,7 @@ let unreadCount = 0;
 let profileUnreadCounts = {}; // { profileId: count }
 let profileNames = {}; // { profileId: displayName }
 let profilePartitions = {}; // { profileId: partition }
+let profileServices = {}; // { profileId: 'messenger' | 'discord' }
 
 let browserViews = {}; // { profileId: BrowserView }
 let webContentsIntervals = new Map(); // webContents.id -> Set<Timeout>
@@ -211,6 +244,8 @@ function getSettingsPanelState() {
       autoLaunch: !!settings.autoLaunch,
       minimizeToTray: !!settings.minimizeToTray,
       sleepBackgroundProfiles: !!settings.sleepBackgroundProfiles,
+      exclusiveService: settings.exclusiveService !== false,
+      activeService: normalizeService(settings.activeService),
       blockSeen: !!settings.blockSeen,
       blockTyping: !!settings.blockTyping,
     },
@@ -321,6 +356,17 @@ function destroyAllBrowserViews() {
   profileSleepTimers.clear();
 }
 
+/** Destroy BrowserViews belonging to a service. Partition/session data is kept. */
+function destroyViewsByService(service) {
+  const target = normalizeService(service);
+  Object.keys(browserViews).forEach((profileId) => {
+    const profileService = normalizeService(profileServices[profileId] || SERVICE_MESSENGER);
+    if (profileService !== target) return;
+    clearProfileSleepTimer(profileId);
+    destroyBrowserView(profileId);
+  });
+}
+
 function getKnownProfilePartitions() {
   const partitions = new Set(Object.values(profilePartitions).filter(Boolean));
   Object.values(browserViews).forEach((view) => {
@@ -366,17 +412,15 @@ async function clearAppCache(clearSessionData = false) {
       updateBadge(0);
       const activePartition = activeProfileId && profilePartitions[activeProfileId];
       if (activePartition && mainWindow && !mainWindow.isDestroyed()) {
+        const service = normalizeService(profileServices[activeProfileId] || settings.activeService);
         const view = new BrowserView({
-          webPreferences: {
-            partition: activePartition,
-            preload: path.join(__dirname, 'preload.js'),
-            contextIsolation: true,
-            nodeIntegration: false,
-          },
+          webPreferences: getPartitionWebPreferences(activePartition, service),
         });
         browserViews[activeProfileId] = view;
-        await setupWebContents(view.webContents, activeProfileId, activePartition);
-        await view.webContents.loadURL(MESSENGER_URL, { userAgent: USER_AGENT });
+        await setupWebContents(view.webContents, activeProfileId, activePartition, { service });
+        await view.webContents.loadURL(getServiceHomeUrl(service), {
+          userAgent: getServiceUserAgent(service),
+        });
         mainWindow.setBrowserView(view);
         updateBrowserViewBounds();
         updateMessengerAwayMode();
@@ -517,6 +561,8 @@ function parseUnreadCountFromTitle(title) {
 }
 
 function updateMessengerAwayMode() {
+  // Privacy away-mode only applies to Messenger sessions
+  if (normalizeService(settings.activeService) !== SERVICE_MESSENGER) return;
   updatePagePrivacyProtection();
 }
 
@@ -1384,6 +1430,38 @@ function isMessengerUrl(url) {
   return isAllowedHttpsHost(url, MESSENGER_HOSTS);
 }
 
+function isDiscordUrl(url) {
+  if (!url) return false;
+  if (url === 'about:blank' || url.startsWith('about:blank#')) return true;
+  try {
+    const host = new URL(url).hostname;
+    return isDiscordHost(host);
+  } catch {
+    return false;
+  }
+}
+
+function isDiscordAuxUrl(url) {
+  if (!url) return false;
+  try {
+    return isDiscordAuxHost(new URL(url).hostname);
+  } catch {
+    return false;
+  }
+}
+
+/** Messenger or Discord web surface (permissions). */
+function isTrustedPermissionUrl(url) {
+  if (!url) return false;
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "https:") return false;
+    return isMessengerUrl(url) || isDiscordHost(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
 function isOAuthPopupUrl(url) {
   try {
     const parsed = new URL(url);
@@ -1405,7 +1483,7 @@ function isOAuthPopupUrl(url) {
 }
 
 function isInAppPopupUrl(url) {
-  return isMessengerUrl(url) || isOAuthPopupUrl(url);
+  return isMessengerUrl(url) || isDiscordUrl(url) || isDiscordAuxUrl(url) || isOAuthPopupUrl(url);
 }
 
 function isMessengerLoginCompleteUrl(url) {
@@ -1479,7 +1557,7 @@ async function preparePrivacyScript(contents) {
   return registerPrivacyScript(contents);
 }
 
-function getMessengerPopupOptions(partition) {
+function getMessengerPopupOptions(partition, service = SERVICE_MESSENGER) {
   return {
     width: 1100,
     height: 760,
@@ -1489,34 +1567,39 @@ function getMessengerPopupOptions(partition) {
     icon: path.join(__dirname, 'icon.png'),
     backgroundColor: settings.isDarkMode ? '#242526' : '#ffffff',
     autoHideMenuBar: true,
-    webPreferences: {
-      partition,
-      preload: path.join(__dirname, 'preload.js'),
-      contextIsolation: true,
-      nodeIntegration: false,
-      spellcheck: false,
-    },
+    webPreferences: getPartitionWebPreferences(partition, service),
   };
 }
 
 async function setupWebContents(contents, profileId, partition, options = {}) {
+  const service = normalizeService(
+    options.service
+      || (profileId && profileServices[profileId])
+      || SERVICE_MESSENGER
+  );
+  const isMessengerService = service === SERVICE_MESSENGER;
+  const homeUrl = getServiceHomeUrl(service);
+  const userAgent = getServiceUserAgent(service);
+
   if (profileId) {
+    profileServices[profileId] = service;
     webContentsProfiles.set(contents.id, profileId);
     contents.once('destroyed', () => webContentsProfiles.delete(contents.id));
   }
 
   // Setup download handler for this view's session
   setupDownloadHandler(contents.session);
-  setupPrivacyRequestBlocker(contents.session);
-
-  // Register CDP privacy script BEFORE page loads to intercept from the start
-  await preparePrivacyScript(contents);
+  // Privacy FB hooks: Messenger only — never on Discord partitions
+  if (isMessengerService) {
+    setupPrivacyRequestBlocker(contents.session);
+    await preparePrivacyScript(contents);
+  }
 
   contents.setWindowOpenHandler(({ url }) => {
     if (isInAppPopupUrl(url)) {
       return {
         action: 'allow',
-        overrideBrowserWindowOptions: getMessengerPopupOptions(partition),
+        overrideBrowserWindowOptions: getMessengerPopupOptions(partition, service),
       };
     }
 
@@ -1528,8 +1611,13 @@ async function setupWebContents(contents, profileId, partition, options = {}) {
 
   contents.on('did-create-window', async (childWindow) => {
     const childContents = childWindow.webContents;
-    childContents.setUserAgent(USER_AGENT);
-    await setupWebContents(childContents, profileId, partition, { skipMessengerPolling: true });
+    childContents.setUserAgent(userAgent);
+    await setupWebContents(childContents, profileId, partition, {
+      skipMessengerPolling: true,
+      service,
+    });
+
+    if (!isMessengerService) return;
 
     let sawOAuthHost = false;
     const closeCompletedOAuthPopup = (navUrl) => {
@@ -1538,7 +1626,7 @@ async function setupWebContents(contents, profileId, partition, options = {}) {
         return;
       }
       if (!sawOAuthHost || !isMessengerLoginCompleteUrl(navUrl)) return;
-      contents.loadURL(MESSENGER_URL, { userAgent: USER_AGENT });
+      contents.loadURL(homeUrl, { userAgent });
       setTimeout(() => {
         if (!childWindow.isDestroyed()) childWindow.close();
       }, 500);
@@ -1584,6 +1672,7 @@ async function setupWebContents(contents, profileId, partition, options = {}) {
   });
 
   contents.on('did-finish-load', async () => {
+    if (!isMessengerService) return;
     const cssPath = path.join(__dirname, 'custom_style.css');
     try {
       const cssData = fs.readFileSync(cssPath, 'utf8');
@@ -1594,13 +1683,14 @@ async function setupWebContents(contents, profileId, partition, options = {}) {
   });
 
   contents.on('page-title-updated', (event, title) => {
+    if (!isMessengerService) return;
     const count = parseUnreadCountFromTitle(title);
     if (count !== null) {
       updateProfileUnreadCount(profileId, count);
     }
   });
 
-  if (!options.skipMessengerPolling) {
+  if (isMessengerService && !options.skipMessengerPolling) {
   const avatarInterval = setInterval(async () => {
     if (contents.isDestroyed()) {
       clearInterval(avatarInterval);
@@ -1653,7 +1743,7 @@ async function setupWebContents(contents, profileId, partition, options = {}) {
     });
   }
 
-  return preparePrivacyScript(contents);
+  return isMessengerService ? preparePrivacyScript(contents) : null;
 }
 
 // ============================================================
@@ -1691,7 +1781,7 @@ function createWindow() {
     sess.setPermissionRequestHandler((webContents, permission, callback, details = {}) => {
       const currentUrl = webContents.getURL();
       const requestingUrl = details.requestingUrl || details.securityOrigin || details.embeddingOrigin || currentUrl;
-      if (isMessengerUrl(currentUrl) || isMessengerUrl(requestingUrl)) {
+      if (isTrustedPermissionUrl(currentUrl) || isTrustedPermissionUrl(requestingUrl)) {
         const allowedPermissions = [
           'media', 'mediaKeySystem', 'microphone',
           'camera', 'clipboard-read', 'clipboard-sanitized-write',
@@ -1710,7 +1800,7 @@ function createWindow() {
       if (permission === 'notifications') {
         return false;
       }
-      if (isMessengerUrl(currentUrl) || isMessengerUrl(requestingUrl)) {
+      if (isTrustedPermissionUrl(currentUrl) || isTrustedPermissionUrl(requestingUrl)) {
         return true;
       }
       return false;
@@ -1757,37 +1847,71 @@ function createWindow() {
   // IPC
   ipcMain.on('switch-profile', async (event, profile) => {
     const previousProfileId = activeProfileId;
+    const previousService = previousProfileId
+      ? normalizeService(profileServices[previousProfileId] || settings.activeService)
+      : normalizeService(settings.activeService);
+    const service = normalizeService(profile.service);
     activeProfileId = profile.id;
-    profileNames[profile.id] = profile.name || 'Messenger';
+    profileNames[profile.id] = profile.name || (service === SERVICE_DISCORD ? 'Discord' : 'Messenger');
     profilePartitions[profile.id] = profile.partition;
+    profileServices[profile.id] = service;
+    settings.activeService = service;
+    settings.lastProfileByService = {
+      ...settings.lastProfileByService,
+      [service]: profile.id,
+    };
+    saveSettings(settings);
+
+    // Exclusive service: destroy other service views (cookies/partitions kept)
+    if (settings.exclusiveService !== false && previousService !== service) {
+      destroyViewsByService(getOtherService(service));
+    }
+
     clearProfileSleepTimer(profile.id);
-    if (previousProfileId && previousProfileId !== profile.id) {
+    if (
+      previousProfileId
+      && previousProfileId !== profile.id
+      && normalizeService(profileServices[previousProfileId] || previousService) === service
+    ) {
       scheduleProfileSleep(previousProfileId);
     }
     if (!browserViews[profile.id]) {
       const view = new BrowserView({
-        webPreferences: {
-          partition: profile.partition,
-          preload: path.join(__dirname, 'preload.js'),
-          contextIsolation: true,
-          nodeIntegration: false,
-        }
+        webPreferences: getPartitionWebPreferences(profile.partition, service),
       });
       browserViews[profile.id] = view;
-      await setupWebContents(view.webContents, profile.id, profile.partition);
-      await view.webContents.loadURL(MESSENGER_URL, { userAgent: USER_AGENT });
+      await setupWebContents(view.webContents, profile.id, profile.partition, { service });
+      await view.webContents.loadURL(getServiceHomeUrl(service), {
+        userAgent: getServiceUserAgent(service),
+      });
     }
     mainWindow.setBrowserView(browserViews[profile.id]);
     updateBrowserViewBounds();
     updateMessengerAwayMode();
   });
 
+  ipcMain.on('set-active-service', (event, service) => {
+    const nextService = normalizeService(service);
+    settings.activeService = nextService;
+    if (
+      activeProfileId
+      && normalizeService(profileServices[activeProfileId] || SERVICE_MESSENGER) !== nextService
+    ) {
+      activeProfileId = null;
+    }
+    saveSettings(settings);
+    if (settings.exclusiveService !== false) {
+      destroyViewsByService(getOtherService(nextService));
+    }
+    updateMessengerAwayMode();
+  });
   ipcMain.on('profiles-updated', (event, profiles = []) => {
     if (!Array.isArray(profiles)) return;
     profiles.forEach((profile) => {
       if (!profile?.id) return;
       if (profile.name) profileNames[profile.id] = profile.name;
       if (profile.partition) profilePartitions[profile.id] = profile.partition;
+      if (profile.service) profileServices[profile.id] = normalizeService(profile.service);
     });
   });
 
@@ -1806,6 +1930,17 @@ function createWindow() {
       sendSettingsPanelState();
     } else if (key === 'sleepBackgroundProfiles') {
       toggleBackgroundProfileSleep(enabled);
+    } else if (key === 'exclusiveService') {
+      settings.exclusiveService = enabled;
+      saveSettings(settings);
+      // Bật exclusive khi đang warm 2 service → đóng ngay service không active
+      if (enabled) {
+        const activeSvc = normalizeService(
+          (activeProfileId && profileServices[activeProfileId]) || settings.activeService
+        );
+        destroyViewsByService(getOtherService(activeSvc));
+      }
+      sendSettingsPanelState();
     } else if (key === 'blockSeen') {
       toggleBlockSeen(enabled);
     } else if (key === 'blockTyping') {
@@ -1834,7 +1969,9 @@ function createWindow() {
 
   ipcMain.on('logout-profile', async (event, profileData) => {
     const { id, partition } = profileData;
+    const service = normalizeService(profileData.service || profileServices[id] || SERVICE_MESSENGER);
     if (profileData.name) profileNames[id] = profileData.name;
+    profileServices[id] = service;
     try {
       // 1. Destroy BrowserView nếu đang tồn tại
       if (browserViews[id]) {
@@ -1851,16 +1988,13 @@ function createWindow() {
 
       // 3. Tạo lại BrowserView mới với session sạch
       const view = new BrowserView({
-        webPreferences: {
-          partition: partition,
-          preload: path.join(__dirname, 'preload.js'),
-          contextIsolation: true,
-          nodeIntegration: false,
-        }
+        webPreferences: getPartitionWebPreferences(partition, service),
       });
       browserViews[id] = view;
-      await setupWebContents(view.webContents, id, partition);
-      await view.webContents.loadURL(MESSENGER_URL, { userAgent: USER_AGENT });
+      await setupWebContents(view.webContents, id, partition, { service });
+      await view.webContents.loadURL(getServiceHomeUrl(service), {
+        userAgent: getServiceUserAgent(service),
+      });
 
       // 4. Hiển thị lại
       if (activeProfileId === id) {
@@ -1916,6 +2050,7 @@ function createWindow() {
     delete profileUnreadCounts[id];
     delete profileNames[id];
     delete profilePartitions[id];
+    delete profileServices[id];
     clearProfileSleepTimer(id);
   });
 
@@ -1982,7 +2117,10 @@ function createWindow() {
 
   ipcMain.on('go-home', () => {
     if (activeProfileId && browserViews[activeProfileId]) {
-      browserViews[activeProfileId].webContents.loadURL(MESSENGER_URL, { userAgent: USER_AGENT });
+      const service = normalizeService(profileServices[activeProfileId] || settings.activeService);
+      browserViews[activeProfileId].webContents.loadURL(getServiceHomeUrl(service), {
+        userAgent: getServiceUserAgent(service),
+      });
     }
   });
 
@@ -2002,6 +2140,12 @@ function createWindow() {
       appLockEnabled: settings.appLockEnabled,
       appLockHash: settings.appLockHash,
       appLockTimeout: settings.appLockTimeout,
+      activeService: normalizeService(settings.activeService),
+      exclusiveService: settings.exclusiveService !== false,
+      lastProfileByService: {
+        messenger: settings.lastProfileByService?.messenger ?? null,
+        discord: settings.lastProfileByService?.discord ?? null,
+      },
     };
   });
 

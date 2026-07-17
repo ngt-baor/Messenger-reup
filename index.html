@@ -94,7 +94,37 @@
       width: 24px; height: 1px; background: rgba(255,255,255,0.1); margin: 4px 0; flex-shrink: 0;
     }
     body.light-mode .tool-separator { background: rgba(0,0,0,0.08); }
+
+    /* Service switch (Messenger / Discord) */
+    .service-btn {
+      width: 34px; height: 34px; border-radius: 10px; border: 1px solid transparent;
+      background: transparent; cursor: pointer; display: flex; align-items: center; justify-content: center;
+      font-size: 11px; font-weight: 700; letter-spacing: 0.02em; color: #b0b3b8;
+      margin-bottom: 2px; padding: 0; flex-shrink: 0; transition: all 0.15s ease;
+    }
+    body.light-mode .service-btn { color: #65676b; }
+    .service-btn:hover { background: rgba(255,255,255,0.08); color: #e4e6eb; }
+    body.light-mode .service-btn:hover { background: rgba(0,0,0,0.04); color: #050505; }
+    .service-btn.active {
+      border-color: #09f; color: #09f; background: rgba(9, 153, 255, 0.12);
+    }
+    body.light-mode .service-btn.active {
+      border-color: #09f; color: #0866ff; background: rgba(8, 102, 255, 0.1);
+    }
+    .service-btn.service-discord.active {
+      border-color: #5865f2; color: #7289da; background: rgba(88, 101, 242, 0.16);
+    }
     
+    .profiles-empty {
+      width: 100%; padding: 10px 6px; box-sizing: border-box; text-align: center;
+      color: #8a8d91; font-size: 10px; line-height: 1.35; user-select: none;
+    }
+    body.light-mode .profiles-empty { color: #8a8d91; }
+    .profiles-empty strong {
+      display: block; font-size: 11px; color: #b0b3b8; margin-bottom: 4px; font-weight: 600;
+    }
+    body.light-mode .profiles-empty strong { color: #65676b; }
+
     #btn-add-profile {
       width: 36px; height: 36px;
       border: 1px dashed rgba(255,255,255,0.4); background: transparent; color: #b0b3b8;
@@ -477,7 +507,7 @@
     </button>
     
     <div id="btn-add-profile-wrap">
-      <button class="profile-btn" id="btn-add-profile" title="Thêm tài khoản Messenger mới">
+      <button class="profile-btn" id="btn-add-profile" title="Thêm tài khoản">
         <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
       </button>
     </div>
@@ -485,7 +515,11 @@
   
   <!-- RIGHT SIDEBAR: Tools -->
   <div id="sidebar-right">
-    <button class="tool-btn" id="btn-home" title="Trang chủ Messenger">
+    <button class="service-btn active" id="btn-service-messenger" type="button" title="Messenger" aria-label="Messenger" aria-pressed="true">M</button>
+    <button class="service-btn service-discord" id="btn-service-discord" type="button" title="Discord" aria-label="Discord" aria-pressed="false">D</button>
+    <div class="tool-separator"></div>
+
+    <button class="tool-btn" id="btn-home" title="Trang chủ">
       <svg viewBox="0 0 24 24" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
     </button>
     <button class="tool-btn" id="btn-back" title="Quay lại">

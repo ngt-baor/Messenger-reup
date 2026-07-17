@@ -1,28 +1,115 @@
 const { ipcRenderer } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const {
+  SERVICE_MESSENGER,
+  SERVICE_DISCORD,
+  normalizeService,
+  normalizeProfile,
+  migrateProfiles,
+  buildPartitionName,
+  profilesForService: filterProfilesForService,
+  pickProfileIdForService: pickIdForService,
+} = require('./service-model');
 
 const profilesList = document.getElementById('profiles-list');
 const scrollUpBtn = document.getElementById('scroll-up');
 const scrollDownBtn = document.getElementById('scroll-down');
 
-// Load profiles
+let profileBadgeCounts = {};
+
+// Load profiles + migrate legacy (missing service → messenger)
 let profiles = [];
 try {
   const saved = localStorage.getItem('mp_profiles');
   if (saved) profiles = JSON.parse(saved);
 } catch(e) {}
 
+{
+  const migrated = migrateProfiles(profiles);
+  profiles = migrated.profiles;
+  if (migrated.changed) {
+    localStorage.setItem('mp_profiles', JSON.stringify(profiles));
+  }
+}
+
+const bootSettings = ipcRenderer.sendSync('get-settings') || {};
+let activeService = normalizeService(bootSettings.activeService);
+let exclusiveService = bootSettings.exclusiveService !== false;
+const lastProfileByService = {
+  messenger: bootSettings.lastProfileByService?.messenger || null,
+  discord: bootSettings.lastProfileByService?.discord || null,
+};
+
 if (profiles.length === 0) {
-  profiles = [{ id: Date.now().toString(), name: 'Nick 1', partition: 'persist:nick_1' }];
+  const id = Date.now().toString();
+  profiles = [{
+    id,
+    name: 'Nick 1',
+    service: SERVICE_MESSENGER,
+    partition: `persist:nick_${id}`,
+  }];
   saveProfiles();
 }
 
-let activeProfileId = profiles[0].id;
+function profilesForService(service = activeService) {
+  return filterProfilesForService(profiles, service);
+}
+
+function pickProfileIdForService(service) {
+  return pickIdForService(profiles, service, lastProfileByService);
+}
+
+let activeProfileId = pickProfileIdForService(activeService) || profiles[0].id;
+{
+  const active = profiles.find((p) => p.id === activeProfileId);
+  if (active) activeService = normalizeService(active.service);
+}
 
 function saveProfiles() {
   localStorage.setItem('mp_profiles', JSON.stringify(profiles));
   ipcRenderer.send('profiles-updated', profiles);
+}
+
+function updateServiceButtons() {
+  const btnM = document.getElementById('btn-service-messenger');
+  const btnD = document.getElementById('btn-service-discord');
+  if (btnM) {
+    btnM.classList.toggle('active', activeService === SERVICE_MESSENGER);
+    btnM.setAttribute('aria-pressed', activeService === SERVICE_MESSENGER ? 'true' : 'false');
+  }
+  if (btnD) {
+    btnD.classList.toggle('active', activeService === SERVICE_DISCORD);
+    btnD.setAttribute('aria-pressed', activeService === SERVICE_DISCORD ? 'true' : 'false');
+  }
+  const addBtn = document.getElementById('btn-add-profile');
+  if (addBtn) {
+    addBtn.title = activeService === SERVICE_DISCORD
+      ? 'Thêm tài khoản Discord'
+      : 'Thêm tài khoản Messenger';
+  }
+}
+
+function switchService(service) {
+  const next = normalizeService(service);
+  if (next === activeService && profilesForService(next).some((p) => p.id === activeProfileId)) {
+    updateServiceButtons();
+    return;
+  }
+  activeService = next;
+  updateServiceButtons();
+  const list = profilesForService(next);
+  if (list.length === 0) {
+    // Empty service: show empty state; user thêm nick bằng +
+    activeProfileId = null;
+    renderSidebar();
+    ipcRenderer.send('set-active-service', next);
+    ipcRenderer.send('set-browserview-visibility', false);
+    return;
+  }
+  const id = pickProfileIdForService(next);
+  if (id) switchProfile(id);
+  else renderSidebar();
 }
 
 // ============================================================
@@ -112,7 +199,17 @@ resizeObserver.observe(profilesList);
 // ============================================================
 function renderSidebar() {
   profilesList.innerHTML = '';
-  profiles.forEach(p => {
+  const visible = profilesForService(activeService);
+
+  if (visible.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'profiles-empty';
+    const label = activeService === SERVICE_DISCORD ? 'Discord' : 'Messenger';
+    empty.innerHTML = `<strong>Chưa có nick ${label}</strong>Bấm + bên dưới để thêm và đăng nhập.`;
+    profilesList.appendChild(empty);
+  }
+
+  visible.forEach(p => {
     const btn = document.createElement('div');
     btn.className = `profile-btn ${p.id === activeProfileId ? 'active' : ''}`;
     btn.title = p.name + ' (Click phải để đổi tên/xóa)';
@@ -144,6 +241,14 @@ function renderSidebar() {
     badge.className = 'badge';
     badge.id = `badge-${p.id}`;
     badge.innerText = '0';
+    // Discord MVP: no unread badge cloning
+    if (normalizeService(p.service) === SERVICE_DISCORD) {
+      badge.style.display = 'none';
+    } else if (profileBadgeCounts[p.id] > 0) {
+      const count = profileBadgeCounts[p.id];
+      badge.innerText = count > 9 ? '9+' : String(count);
+      badge.style.display = 'block';
+    }
     btn.appendChild(badge);
     
     btn.onclick = () => switchProfile(p.id);
@@ -157,15 +262,17 @@ function renderSidebar() {
   
   // Update scroll arrows after rendering
   setTimeout(updateScrollArrows, 50);
+  updateServiceButtons();
 }
 
 function switchProfile(id) {
-  activeProfileId = id;
-  renderSidebar();
   const p = profiles.find(x => x.id === id);
-  if (p) {
-    ipcRenderer.send('switch-profile', p);
-  }
+  if (!p) return;
+  activeProfileId = id;
+  activeService = normalizeService(p.service);
+  lastProfileByService[activeService] = id;
+  renderSidebar();
+  ipcRenderer.send('switch-profile', p);
 }
 
 // ============================================================
@@ -185,8 +292,10 @@ function openModal(profileToEdit = null) {
   ipcRenderer.send('set-browserview-visibility', false);
   editingProfile = profileToEdit;
   tempAvatarPath = profileToEdit ? profileToEdit.avatar : null;
-  
-  modalTitle.innerText = profileToEdit ? 'Chỉnh sửa tài khoản' : 'Thêm tài khoản';
+  const svcLabel = activeService === SERVICE_DISCORD ? 'Discord' : 'Messenger';
+  modalTitle.innerText = profileToEdit
+    ? `Chỉnh sửa tài khoản ${svcLabel}`
+    : `Thêm tài khoản ${svcLabel}`;
   nameInput.value = profileToEdit ? profileToEdit.name : '';
   document.getElementById('modal-delete').style.display = profileToEdit ? 'block' : 'none';
   document.getElementById('modal-logout').style.display = profileToEdit ? 'flex' : 'none';
@@ -223,16 +332,34 @@ document.getElementById('modal-delete').onclick = () => {
   if (!editingProfile) return;
   const action = confirm(`Bạn có chắc chắn muốn XÓA tài khoản [${editingProfile.name}]?`);
   if (action) {
-    if (profiles.length <= 1) {
+    const sameService = profilesForService(editingProfile.service);
+    if (sameService.length <= 1 && normalizeService(editingProfile.service) === SERVICE_MESSENGER) {
+      alert('Phải có ít nhất 1 tài khoản Messenger!');
+      return;
+    }
+    if (sameService.length <= 1 && normalizeService(editingProfile.service) === SERVICE_DISCORD) {
+      // Allow deleting last Discord account — list can be empty
+    } else if (profiles.length <= 1) {
       alert('Phải có ít nhất 1 tài khoản!');
       return;
     }
+    const deletedService = normalizeService(editingProfile.service);
     profiles = profiles.filter(x => x.id !== editingProfile.id);
     saveProfiles();
     ipcRenderer.send('delete-profile', editingProfile.id);
-    if (activeProfileId === editingProfile.id) switchProfile(profiles[0].id);
+    if (activeProfileId === editingProfile.id) {
+      const nextId = pickProfileIdForService(deletedService)
+        || pickProfileIdForService(SERVICE_MESSENGER)
+        || (profiles[0] && profiles[0].id);
+      if (nextId) switchProfile(nextId);
+      else {
+        activeProfileId = null;
+        renderSidebar();
+      }
+    } else {
+      renderSidebar();
+    }
     modalOverlay.style.display = 'none';
-    renderSidebar();
     ipcRenderer.send('set-browserview-visibility', true);
   }
 };
@@ -252,15 +379,18 @@ document.getElementById('modal-save').onclick = () => {
   if (editingProfile) {
     editingProfile.name = name;
     editingProfile.avatar = tempAvatarPath;
+    if (!editingProfile.service) editingProfile.service = activeService;
   } else {
     // Sử dụng crypto UUID để tránh trùng ID
     const id = crypto.randomUUID ? crypto.randomUUID() : Date.now().toString() + '_' + Math.random().toString(36).slice(2);
-    const partition = `persist:nick_${id}`;
-    const p = { id, name, avatar: tempAvatarPath, partition };
+    const service = normalizeService(activeService);
+    const partition = buildPartitionName(id, service);
+    const p = { id, name, avatar: tempAvatarPath, partition, service };
     // Xóa sạch session cũ nếu tồn tại (đảm bảo không dùng cookie cũ)
     ipcRenderer.send('clear-new-profile-session', partition);
     profiles.push(p);
     activeProfileId = id;
+    activeService = service;
   }
   
   saveProfiles();
@@ -285,7 +415,12 @@ document.getElementById('modal-logout').onclick = () => {
   editingProfile.avatar = null;
   saveProfiles();
 
-  ipcRenderer.send('logout-profile', { id: editingProfile.id, name: editingProfile.name, partition: editingProfile.partition });
+  ipcRenderer.send('logout-profile', {
+    id: editingProfile.id,
+    name: editingProfile.name,
+    partition: editingProfile.partition,
+    service: normalizeService(editingProfile.service),
+  });
 };
 
 // Nhận kết quả logout
@@ -357,9 +492,12 @@ document.getElementById('btn-lock').oncontextmenu = (e) => {
 // ============================================================
 //  IPC UPDATES FROM MAIN
 // ============================================================
-let profileBadgeCounts = {};
-
 ipcRenderer.on('update-profile-badge', (event, { id, count }) => {
+  const p = profiles.find((x) => x.id === id);
+  if (p && normalizeService(p.service) === SERVICE_DISCORD) {
+    profileBadgeCounts[id] = 0;
+    return;
+  }
   const badge = document.getElementById(`badge-${id}`);
   if (badge) {
     badge.innerText = count > 9 ? '9+' : count;
@@ -385,7 +523,7 @@ ipcRenderer.on('update-profile-avatar', (event, { id, avatarUrl }) => {
 // ============================================================
 //  INIT
 // ============================================================
-const settings = ipcRenderer.sendSync('get-settings');
+const settings = bootSettings;
 isDarkMode = settings.isDarkMode;
 document.body.className = isDarkMode ? 'dark-mode' : 'light-mode';
 document.getElementById('icon-sun').style.display = isDarkMode ? 'none' : 'block';
@@ -394,9 +532,16 @@ if(settings.alwaysOnTop) {
   document.getElementById('btn-pin').style.opacity = '1';
 }
 
+document.getElementById('btn-service-messenger').onclick = () => switchService(SERVICE_MESSENGER);
+document.getElementById('btn-service-discord').onclick = () => switchService(SERVICE_DISCORD);
+
 renderSidebar();
 ipcRenderer.send('profiles-updated', profiles);
-switchProfile(activeProfileId);
+if (activeProfileId) {
+  switchProfile(activeProfileId);
+} else {
+  updateServiceButtons();
+}
 
 // ============================================================
 //  APP LOCK MODULE
