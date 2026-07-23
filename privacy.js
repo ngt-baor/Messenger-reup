@@ -1,17 +1,13 @@
 'use strict';
 
-function payloadToText(payload) {
-  if (payload === undefined || payload === null) return '';
-  if (typeof payload === 'string') return payload;
-
-  if (typeof URLSearchParams !== 'undefined' && payload instanceof URLSearchParams) {
-    return payload.toString();
-  }
-
+function payloadToBytes(payload) {
   let bytes = null;
+  let returnArrayBuffer = false;
+
   if (typeof ArrayBuffer !== 'undefined') {
     if (payload instanceof ArrayBuffer) {
       bytes = new Uint8Array(payload);
+      returnArrayBuffer = true;
     } else if (ArrayBuffer.isView(payload)) {
       bytes = new Uint8Array(payload.buffer, payload.byteOffset, payload.byteLength);
     }
@@ -20,6 +16,19 @@ function payloadToText(payload) {
   if (typeof Buffer !== 'undefined' && Buffer.isBuffer(payload)) {
     bytes = payload;
   }
+
+  return { bytes, returnArrayBuffer };
+}
+
+function payloadToText(payload) {
+  if (payload === undefined || payload === null) return '';
+  if (typeof payload === 'string') return payload;
+
+  if (typeof URLSearchParams !== 'undefined' && payload instanceof URLSearchParams) {
+    return payload.toString();
+  }
+
+  const { bytes } = payloadToBytes(payload);
 
   if (bytes) {
     let decodedStr = '';
@@ -215,11 +224,15 @@ function shouldBlockWorkerMessage(message, config) {
   return !isRealMessage;
 }
 
+function isMessengerGatewayWebSocket(url) {
+  const requestUrl = String(url || '').toLowerCase();
+  return requestUrl.startsWith('wss://') && requestUrl.includes('gateway.facebook.com/ws/');
+}
+
 function shouldBlockMessengerWebSocketSend(url, payload, config = {}) {
   if (!config.blockTyping) return false;
 
-  const requestUrl = String(url || '').toLowerCase();
-  if (!requestUrl.startsWith('wss://') || !requestUrl.includes('gateway.facebook.com/ws/')) {
+  if (!isMessengerGatewayWebSocket(url)) {
     return false;
   }
 
@@ -249,8 +262,7 @@ function shouldBlockMessengerWebSocketSend(url, payload, config = {}) {
 function sanitizeMessengerWebSocketPayload(url, payload, config = {}) {
   if (!config.blockTyping) return payload;
 
-  const requestUrl = String(url || '').toLowerCase();
-  if (!requestUrl.startsWith('wss://') || !requestUrl.includes('gateway.facebook.com/ws/')) {
+  if (!isMessengerGatewayWebSocket(url)) {
     return payload;
   }
 
@@ -264,16 +276,7 @@ function sanitizeMessengerWebSocketPayload(url, payload, config = {}) {
     return replaceTypingText(payload);
   }
 
-  let bytes = null;
-  let returnArrayBuffer = false;
-  if (typeof ArrayBuffer !== 'undefined') {
-    if (payload instanceof ArrayBuffer) {
-      bytes = new Uint8Array(payload);
-      returnArrayBuffer = true;
-    } else if (ArrayBuffer.isView(payload)) {
-      bytes = new Uint8Array(payload.buffer, payload.byteOffset, payload.byteLength);
-    }
-  }
+  const { bytes, returnArrayBuffer } = payloadToBytes(payload);
 
   if (!bytes) return payload;
 
@@ -448,16 +451,20 @@ function installPrivacyProtection(target, config = {}) {
     };
   }
 
+  const forwardPrivacyPostMessage = function(originalPostMessage, receiver, message, transfer) {
+    if (shouldBlockWorkerMessage(message, target.__messengerPrivacyConfig)) {
+      return undefined;
+    }
+    return originalPostMessage.call(receiver, message, transfer);
+  };
+
   if (typeof target.Worker === 'function') {
     const OriginalWorker = target.Worker;
     target.Worker = function PrivacyWorker(scriptURL, options) {
       const worker = new OriginalWorker(scriptURL, options);
       const originalPostMessage = worker.postMessage;
       worker.postMessage = function privacyWorkerPostMessage(message, transfer) {
-        if (shouldBlockWorkerMessage(message, target.__messengerPrivacyConfig)) {
-          return undefined;
-        }
-        return originalPostMessage.call(this, message, transfer);
+        return forwardPrivacyPostMessage(originalPostMessage, this, message, transfer);
       };
       return worker;
     };
@@ -471,10 +478,7 @@ function installPrivacyProtection(target, config = {}) {
       if (worker.port) {
         const originalPostMessage = worker.port.postMessage;
         worker.port.postMessage = function privacySharedWorkerPostMessage(message, transfer) {
-          if (shouldBlockWorkerMessage(message, target.__messengerPrivacyConfig)) {
-            return undefined;
-          }
-          return originalPostMessage.call(this, message, transfer);
+          return forwardPrivacyPostMessage(originalPostMessage, this, message, transfer);
         };
       }
       return worker;
@@ -509,6 +513,8 @@ async function registerPrivacyScriptForNewDocuments(
 function buildPrivacyPatchSource(targetExpression, config) {
   return `
     (function() {
+      const payloadToBytes = ${payloadToBytes.toString()};
+      const isMessengerGatewayWebSocket = ${isMessengerGatewayWebSocket.toString()};
       const payloadToText = ${payloadToText.toString()};
       const shouldBlockMessengerRequest = ${shouldBlockMessengerRequest.toString()};
       const shouldBlockWorkerMessage = ${shouldBlockWorkerMessage.toString()};

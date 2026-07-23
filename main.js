@@ -369,6 +369,33 @@ function getKnownProfilePartitions() {
   return [...partitions];
 }
 
+async function createProfileBrowserView(profileId, partition, service) {
+  const view = new BrowserView({
+    webPreferences: getPartitionWebPreferences(partition, service),
+  });
+  browserViews[profileId] = view;
+  await setupWebContents(view.webContents, profileId, partition, { service });
+  await view.webContents.loadURL(getServiceHomeUrl(service), {
+    userAgent: getServiceUserAgent(service),
+  });
+  return view;
+}
+
+const PROFILE_SESSION_STORAGES = [
+  'cookies',
+  'localstorage',
+  'sessionstorage',
+  'cachestorage',
+  'indexdb',
+  'shadercache',
+  'websql',
+  'serviceworkers',
+];
+
+function clearProfileStorage(sess) {
+  return sess.clearStorageData({ storages: PROFILE_SESSION_STORAGES });
+}
+
 async function clearAppCache(clearSessionData = false) {
   const title = clearSessionData ? 'Dọn cache và đăng xuất tất cả' : 'Dọn cache';
   const message = clearSessionData
@@ -391,9 +418,7 @@ async function clearAppCache(clearSessionData = false) {
     await Promise.all(sessions.map(async (sess) => {
       await sess.clearCache();
       if (clearSessionData) {
-        await sess.clearStorageData({
-          storages: ['cookies', 'localstorage', 'sessionstorage', 'cachestorage', 'indexdb', 'shadercache', 'websql', 'serviceworkers'],
-        });
+        await clearProfileStorage(sess);
         await sess.clearAuthCache();
       }
     }));
@@ -406,14 +431,7 @@ async function clearAppCache(clearSessionData = false) {
       const activePartition = activeProfileId && profilePartitions[activeProfileId];
       if (activePartition && mainWindow && !mainWindow.isDestroyed()) {
         const service = normalizeService(profileServices[activeProfileId] || settings.activeService);
-        const view = new BrowserView({
-          webPreferences: getPartitionWebPreferences(activePartition, service),
-        });
-        browserViews[activeProfileId] = view;
-        await setupWebContents(view.webContents, activeProfileId, activePartition, { service });
-        await view.webContents.loadURL(getServiceHomeUrl(service), {
-          userAgent: getServiceUserAgent(service),
-        });
+        const view = await createProfileBrowserView(activeProfileId, activePartition, service);
         mainWindow.setBrowserView(view);
         updateBrowserViewBounds();
         updateMessengerAwayMode();
@@ -1340,16 +1358,11 @@ function updatePagePrivacyProtection(privacySettings = getPrivacySettings()) {
   return Promise.all(updates);
 }
 
-function toggleBlockSeen(enable) {
-  settings.blockSeen = enable;
-  saveSettings(settings);
-  const updatePromise = updatePagePrivacyProtection(getPrivacySettings());
-  sendSettingsPanelState();
-  return updatePromise;
-}
+const PRIVACY_SETTING_KEYS = new Set(['blockSeen', 'blockTyping']);
 
-function toggleBlockTyping(enable) {
-  settings.blockTyping = enable;
+function setPrivacySetting(key, enable) {
+  if (!PRIVACY_SETTING_KEYS.has(key)) return Promise.resolve([]);
+  settings[key] = enable;
   saveSettings(settings);
   const updatePromise = updatePagePrivacyProtection(getPrivacySettings());
   sendSettingsPanelState();
@@ -2077,14 +2090,7 @@ function createWindow() {
       scheduleProfileSleep(previousProfileId);
     }
     if (!browserViews[profile.id]) {
-      const view = new BrowserView({
-        webPreferences: getPartitionWebPreferences(profile.partition, service),
-      });
-      browserViews[profile.id] = view;
-      await setupWebContents(view.webContents, profile.id, profile.partition, { service });
-      await view.webContents.loadURL(getServiceHomeUrl(service), {
-        userAgent: getServiceUserAgent(service),
-      });
+      await createProfileBrowserView(profile.id, profile.partition, service);
     }
     mainWindow.setBrowserView(browserViews[profile.id]);
     updateBrowserViewBounds();
@@ -2142,10 +2148,8 @@ function createWindow() {
         destroyViewsByService(getOtherService(activeSvc));
       }
       sendSettingsPanelState();
-    } else if (key === 'blockSeen') {
-      await toggleBlockSeen(enabled);
-    } else if (key === 'blockTyping') {
-      await toggleBlockTyping(enabled);
+    } else if (PRIVACY_SETTING_KEYS.has(key)) {
+      await setPrivacySetting(key, enabled);
     }
     return getSettingsPanelState();
   });
@@ -2181,21 +2185,12 @@ function createWindow() {
 
       // 2. Xóa sạch cookies + cache + storage của partition
       const sess = session.fromPartition(partition);
-      await sess.clearStorageData({
-        storages: ['cookies', 'localstorage', 'sessionstorage', 'cachestorage', 'indexdb', 'shadercache', 'websql', 'serviceworkers'],
-      });
+      await clearProfileStorage(sess);
       await sess.clearCache();
       await sess.clearAuthCache();
 
       // 3. Tạo lại BrowserView mới với session sạch
-      const view = new BrowserView({
-        webPreferences: getPartitionWebPreferences(partition, service),
-      });
-      browserViews[id] = view;
-      await setupWebContents(view.webContents, id, partition, { service });
-      await view.webContents.loadURL(getServiceHomeUrl(service), {
-        userAgent: getServiceUserAgent(service),
-      });
+      const view = await createProfileBrowserView(id, partition, service);
 
       // 4. Hiển thị lại
       if (activeProfileId === id) {
@@ -2214,9 +2209,7 @@ function createWindow() {
   ipcMain.on('clear-new-profile-session', async (event, partition) => {
     try {
       const sess = session.fromPartition(partition);
-      await sess.clearStorageData({
-        storages: ['cookies', 'localstorage', 'sessionstorage', 'cachestorage', 'indexdb', 'shadercache', 'websql', 'serviceworkers'],
-      });
+      await clearProfileStorage(sess);
       await sess.clearCache();
     } catch (err) {}
   });

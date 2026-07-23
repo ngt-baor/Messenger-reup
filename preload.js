@@ -1,11 +1,12 @@
 const { contextBridge, ipcRenderer, webFrame } = require('electron');
 const { buildPrivacyPatchScript } = require('./privacy');
+const { normalizeService } = require('./service-model');
 
 /** Set via BrowserView webPreferences.additionalArguments: --mp-service=messenger|discord */
 function getPreloadService() {
   const arg = process.argv.find((item) => typeof item === 'string' && item.startsWith('--mp-service='));
   if (!arg) return 'messenger';
-  return arg.slice('--mp-service='.length) === 'discord' ? 'discord' : 'messenger';
+  return normalizeService(arg.slice('--mp-service='.length));
 }
 
 const PRELOAD_SERVICE = getPreloadService();
