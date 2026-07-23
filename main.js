@@ -1776,6 +1776,7 @@ async function setupWebContents(contents, profileId, partition, options = {}) {
       || SERVICE_MESSENGER
   );
   const isMessengerService = service === SERVICE_MESSENGER;
+  let privacyScriptIdentifier = null;
   if (isMessengerService) trackPrivacyWebContents(contents);
   const homeUrl = getServiceHomeUrl(service);
   const userAgent = getServiceUserAgent(service);
@@ -1791,7 +1792,7 @@ async function setupWebContents(contents, profileId, partition, options = {}) {
   // Privacy FB hooks: Messenger only — never on Discord partitions
   if (isMessengerService) {
     setupPrivacyRequestBlocker(contents.session);
-    await preparePrivacyScript(contents);
+    privacyScriptIdentifier = await preparePrivacyScript(contents);
   }
 
   contents.setWindowOpenHandler(({ url }) => {
@@ -1951,7 +1952,7 @@ async function setupWebContents(contents, profileId, partition, options = {}) {
     });
   }
 
-  return isMessengerService ? preparePrivacyScript(contents) : null;
+  return privacyScriptIdentifier;
 }
 
 // ============================================================

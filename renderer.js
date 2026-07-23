@@ -34,6 +34,11 @@ try {
 }
 
 const bootSettings = ipcRenderer.sendSync('get-settings') || {};
+const lockSettings = {
+  enabled: !!bootSettings.appLockEnabled,
+  hash: bootSettings.appLockHash || '',
+  timeout: bootSettings.appLockTimeout ?? 5,
+};
 let activeService = normalizeService(bootSettings.activeService);
 let exclusiveService = bootSettings.exclusiveService !== false;
 const lastProfileByService = {
@@ -477,7 +482,7 @@ document.getElementById('btn-j2team').onclick = () => {
 
 // Lock button — click: lock, right-click: settings
 document.getElementById('btn-lock').onclick = () => {
-  const ls = ipcRenderer.sendSync('get-lock-settings');
+  const ls = lockSettings;
   if (ls.enabled && ls.hash) {
     lockApp('verify');
   } else {
@@ -562,6 +567,11 @@ const lock = {
   idleTimer: null,
   isLocked: false,
 };
+function saveLockSettings(patch) {
+  Object.assign(lockSettings, patch);
+  ipcRenderer.send('save-lock-settings', patch);
+}
+
 
 function hashPin(pin) {
   return crypto.createHash('sha256').update(pin + '_messlo_salt_2026').digest('hex');
@@ -618,7 +628,7 @@ function handlePinKey(key) {
 }
 
 function handlePinComplete() {
-  const ls = ipcRenderer.sendSync('get-lock-settings');
+  const ls = lockSettings;
 
   if (lock.mode === 'setup') {
     // Step 1: Save first entry
@@ -633,7 +643,7 @@ function handlePinComplete() {
     // Step 2: Confirm PIN match
     if (lock.enteredPin === lock.setupPin) {
       const hash = hashPin(lock.enteredPin);
-      ipcRenderer.send('save-lock-settings', { enabled: true, hash });
+      saveLockSettings({ enabled: true, hash });
       lockMessage.textContent = 'Đã thiết lập mã PIN';
       lockMessage.className = 'lock-subtitle success';
       setTimeout(unlockApp, 700);
@@ -702,7 +712,7 @@ document.addEventListener('keydown', (e) => {
 // Lock disable button (shown in footer)
 lockDisableBtn.onclick = () => {
   if (confirm('Bạn có chắc muốn tắt khoá ứng dụng?')) {
-    ipcRenderer.send('save-lock-settings', { enabled: false, hash: '' });
+    saveLockSettings({ enabled: false, hash: '' });
     unlockApp();
   }
 };
@@ -717,7 +727,7 @@ const lsChangePin = document.getElementById('ls-change-pin');
 const lsRemovePin = document.getElementById('ls-remove-pin');
 
 function openLockSettings() {
-  const ls = ipcRenderer.sendSync('get-lock-settings');
+  const ls = lockSettings;
   lsToggle.classList.toggle('on', ls.enabled);
   lsTimeout.value = String(ls.timeout || 5);
   lsChangePin.style.display = ls.enabled ? 'block' : 'none';
@@ -727,22 +737,23 @@ function openLockSettings() {
 }
 
 lsToggle.onclick = () => {
-  const ls = ipcRenderer.sendSync('get-lock-settings');
+  const ls = lockSettings;
   if (!ls.enabled) {
     // Enable: show setup PIN
     lockSettingsOverlay.style.display = 'none';
     lockApp('setup');
   } else {
     // Disable
-    ipcRenderer.send('save-lock-settings', { enabled: false, hash: '' });
+    saveLockSettings({ enabled: false, hash: '' });
     lsToggle.classList.remove('on');
     lsChangePin.style.display = 'none';
     lsRemovePin.style.display = 'none';
+    resetIdleTimer();
   }
 };
 
 lsTimeout.onchange = () => {
-  ipcRenderer.send('save-lock-settings', { timeout: parseInt(lsTimeout.value) });
+  saveLockSettings({ timeout: parseInt(lsTimeout.value) });
   resetIdleTimer();
 };
 
@@ -753,10 +764,11 @@ lsChangePin.onclick = () => {
 
 lsRemovePin.onclick = () => {
   if (confirm('Xoá mã PIN? Khoá ứng dụng sẽ bị tắt.')) {
-    ipcRenderer.send('save-lock-settings', { enabled: false, hash: '' });
+    saveLockSettings({ enabled: false, hash: '' });
     lockSettingsOverlay.style.display = 'none';
     ipcRenderer.send('set-browserview-visibility', true);
     lsToggle.classList.remove('on');
+    resetIdleTimer();
   }
 };
 
@@ -770,10 +782,10 @@ document.getElementById('ls-close').onclick = () => {
 // ============================================================
 function resetIdleTimer() {
   if (lock.idleTimer) clearTimeout(lock.idleTimer);
-  const ls = ipcRenderer.sendSync('get-lock-settings');
+  const ls = lockSettings;
   if (ls.enabled && ls.timeout > 0) {
     lock.idleTimer = setTimeout(() => {
-      if (!lock.isLocked) lockApp('verify');
+      if (ls.enabled && !lock.isLocked) lockApp('verify');
     }, ls.timeout * 60 * 1000);
   }
 }
@@ -787,7 +799,7 @@ function resetIdleTimer() {
 // ============================================================
 //  INIT LOCK — Lock on startup if enabled
 // ============================================================
-if (settings.appLockEnabled && settings.appLockHash) {
+if (lockSettings.enabled && lockSettings.hash) {
   lockApp('verify');
 }
 resetIdleTimer();
