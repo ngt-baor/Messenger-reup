@@ -91,7 +91,7 @@ optionMap.forEach((key, input) => {
 fields.updateAction.addEventListener('click', async () => {
   fields.updateAction.disabled = true;
   try {
-    renderState(await window.settingsApi.updateAction());
+    await window.settingsApi.updateAction();
   } catch (error) {
     fields.updateStatus.textContent = `Lỗi cập nhật: ${error?.message || 'Không thể thực hiện cập nhật.'}`;
     fields.updateBadge.textContent = 'Có lỗi';
@@ -114,4 +114,5 @@ fields.openUserData.addEventListener('click', () => {
 });
 
 window.settingsApi.onStateUpdated(renderState);
+fields.updateAction.disabled = true;
 refreshState();

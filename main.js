@@ -63,6 +63,7 @@ function getPartitionWebPreferences(partition, service) {
     partition,
     preload: path.join(__dirname, 'preload.js'),
     contextIsolation: true,
+    sandbox: true,
     nodeIntegration: false,
     spellcheck: false,
     additionalArguments: [`--mp-service=${svc}`],
@@ -1560,7 +1561,7 @@ function setupAutoUpdater() {
 
 function checkForUpdates(manual = false) {
   isManualUpdateCheck = manual;
-  autoUpdater.checkForUpdates();
+  return autoUpdater.checkForUpdates();
 }
 
 function toggleAutoLaunch(enable) {
@@ -2162,10 +2163,10 @@ function createWindow() {
     return getSettingsPanelState();
   });
 
-  ipcMain.handle('settings:update-action', () => {
+  ipcMain.handle('settings:update-action', async () => {
     if (updateTrayState.downloaded) installDownloadedUpdate();
     else if (updateTrayState.available) startUpdateDownload();
-    else checkForUpdates(true);
+    else await checkForUpdates(true);
     sendSettingsPanelState();
     return getSettingsPanelState();
   });
@@ -2262,10 +2263,11 @@ function createWindow() {
   });
 
   ipcMain.on('messenger-unread-signal', (event, data = {}) => {
+    if (!data || typeof data !== 'object') return;
     const profileId = webContentsProfiles.get(event.sender.id);
     if (!profileId) return;
 
-    let count = typeof data.count === 'number' ? data.count : null;
+    let count = Number.isFinite(data.count) ? data.count : null;
     if (count === null) {
       count = parseUnreadCountFromTitle(data.title);
     }

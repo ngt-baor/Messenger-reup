@@ -1,5 +1,18 @@
 # Changelog
 
+## v1.2.1 — Cải thiện hiệu năng
+
+### Sửa lỗi hiệu năng
+
+- Giảm đáng kể tình trạng giật/lag khi sử dụng nhiều tài khoản Messenger cùng lúc
+- Tối ưu cách ứng dụng theo dõi tin nhắn chưa đọc, giảm tải CPU khi để app chạy nền
+- Giảm độ trễ khi di chuột/tương tác giao diện (sidebar, thanh công cụ)
+- Tối ưu quá trình khởi tạo khi mở/chuyển đổi tài khoản
+
+### Sửa lỗi
+
+- Sửa lỗi nút "Kiểm tra cập nhật" có thể bị kẹt (không bấm lại được) khi kiểm tra thất bại
+
 ## Messenger v1.2.0
 
 - Thêm multi-service: Messenger + Discord (web + cookie/partition).
