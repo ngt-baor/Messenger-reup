@@ -132,7 +132,7 @@ function loadSettings() {
 function saveSettings(data) {
   try {
     fs.writeFileSync(SETTINGS_PATH, JSON.stringify(normalizeSettings(data), null, 2), 'utf8');
-  } catch (err) {}
+  } catch {}
 }
 
 // ============================================================
@@ -961,7 +961,7 @@ function setupPrivacyRequestBlocker(sess) {
           if (params.has('doc_id')) {
             parsedDocId = params.get('doc_id');
           }
-        } catch (e) {}
+        } catch {}
 
         privacyDebugLog(
           `[${shouldBlock ? 'BLOCKED' : 'ALLOWED'}] URL=${details.url.substring(0, 150)}\n` +
@@ -1102,7 +1102,7 @@ async function setupPrivacyNetworkDebugger(contents) {
     );
   };
 
-  onDebuggerMessage = (event, method, params = {}, sessionId = '') => {
+  onDebuggerMessage = async (event, method, params = {}, sessionId = '') => {
     if (cleanedUp) return;
     const privacySettings = getPrivacySettings();
 
@@ -1159,13 +1159,14 @@ async function setupPrivacyNetworkDebugger(contents) {
     if (request.method && request.method !== 'POST') return;
 
     if (!request.postData && request.hasPostData && params.requestId) {
-      debuggerApi.sendCommand('Network.getRequestPostData', { requestId: params.requestId })
-        .then((result) => {
-          if (!cleanedUp) writeCdpHttpLog(request, result?.postData || '', privacySettings);
-        })
-        .catch(() => {
-          if (!cleanedUp) writeCdpHttpLog(request, '', privacySettings);
+      try {
+        const result = await debuggerApi.sendCommand('Network.getRequestPostData', {
+          requestId: params.requestId,
         });
+        if (!cleanedUp) writeCdpHttpLog(request, result?.postData || '', privacySettings);
+      } catch {
+        if (!cleanedUp) writeCdpHttpLog(request, '', privacySettings);
+      }
       return;
     }
 
@@ -1409,7 +1410,7 @@ function setUpdateTrayState(nextState = {}) {
   sendSettingsPanelState();
 }
 
-function startUpdateDownload() {
+async function startUpdateDownload() {
   if (!updateTrayState.available || isUpdateDownloadActive) return;
   isUpdateDownloadActive = true;
   showUpdateProgress({
@@ -1419,14 +1420,16 @@ function startUpdateDownload() {
     total: 0,
     bytesPerSecond: 0,
   });
-  autoUpdater.downloadUpdate().catch((error) => {
+  try {
+    await autoUpdater.downloadUpdate();
+  } catch (error) {
     isUpdateDownloadActive = false;
     setUpdateTrayState({ error: error?.message || 'Không thể tải bản cập nhật.' });
     showUpdateProgress({
       phase: 'error',
       message: `${error?.message || 'Không thể tải bản cập nhật.'} Ứng dụng vẫn giữ phiên bản hiện tại.`,
     });
-  });
+  }
 }
 
 function installDownloadedUpdate() {
@@ -1458,7 +1461,7 @@ function setupAutoUpdater() {
     prepareForFullQuit();
   });
 
-  autoUpdater.on('update-available', (info) => {
+  autoUpdater.on('update-available', async (info) => {
     pendingUpdateVersion = info.version || '';
     pendingUpdateReleaseNotes = Array.isArray(info.releaseNotes)
       ? info.releaseNotes.map((item) => item.note || item).join('\n')
@@ -1470,16 +1473,15 @@ function setupAutoUpdater() {
       releaseNotes: pendingUpdateReleaseNotes,
       error: '',
     });
-    dialog.showMessageBox({
+    const result = await dialog.showMessageBox({
       type: 'info',
       title: 'Có bản cập nhật mới',
       message: `Đã có bản cập nhật mới v${info.version}. Bạn có muốn tải xuống và cài đặt không?`,
       buttons: ['Tải xuống', 'Cài sau']
-    }).then(result => {
-      if (result.response === 0) {
-        startUpdateDownload();
-      }
     });
+    if (result.response === 0) {
+      startUpdateDownload();
+    }
   });
 
   autoUpdater.on('update-not-available', (info) => {
@@ -1902,7 +1904,7 @@ async function setupWebContents(contents, profileId, partition, options = {}) {
     try {
       const cssData = fs.readFileSync(cssPath, 'utf8');
       contents.insertCSS(cssData);
-    } catch(e) {}
+    } catch {}
     contents.executeJavaScript(buildPrivacyPatchScript(getPrivacySettings())).catch(() => {});
     installMessengerUnreadObserver(contents);
   });
@@ -1928,7 +1930,7 @@ async function setupWebContents(contents, profileId, partition, options = {}) {
       if (avatarUrl && mainWindow && profileId) {
         mainWindow.webContents.send('update-profile-avatar', { id: profileId, avatarUrl });
       }
-    } catch(e) {}
+    } catch {}
   }, 5000);
   trackWebContentsInterval(contents, avatarInterval);
 
@@ -1959,7 +1961,7 @@ async function setupWebContents(contents, profileId, partition, options = {}) {
       `);
       if (titleRevision !== unreadTitleRevision) return;
       updateProfileUnreadCount(profileId, count || 0);
-    } catch(e) {}
+    } catch {}
   }, 1000);
   trackWebContentsInterval(contents, unreadInterval);
   }
@@ -2211,7 +2213,7 @@ function createWindow() {
       const sess = session.fromPartition(partition);
       await clearProfileStorage(sess);
       await sess.clearCache();
-    } catch (err) {}
+    } catch {}
   });
 
   ipcMain.on('set-browserview-visibility', (event, visible) => {
@@ -2403,7 +2405,7 @@ function registerGlobalShortcuts() {
   const hotkey = settings.globalHotkey || 'Ctrl+Shift+M';
   try {
     globalShortcut.register(hotkey, toggleMainWindowVisibility);
-  } catch (err) {}
+  } catch {}
 }
 
 // ============================================================
