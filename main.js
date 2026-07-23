@@ -200,16 +200,8 @@ function createTray() {
   }
   tray = new Tray(trayIcon);
   updateTrayMenu();
-  tray.setToolTip(APP_NAME);
 
-  tray.on('click', () => {
-    if (!mainWindow) return;
-    if (mainWindow.isVisible() && mainWindow.isFocused()) {
-      mainWindow.hide();
-    } else {
-      showExistingInstance();
-    }
-  });
+  tray.on('click', toggleMainWindowVisibility);
 
   tray.on('double-click', () => {
     if (!mainWindow) return;
@@ -222,9 +214,8 @@ function updateTrayMenu() {
   const contextMenu = Menu.buildFromTemplate([
     { label: 'Mở Messenger', click: () => showExistingInstance() },
     { label: 'Tải lại trang', click: () => {
-      if (activeProfileId && browserViews[activeProfileId]) {
-        browserViews[activeProfileId].webContents.reload();
-      }
+      const contents = getActiveWebContents();
+      if (contents) contents.reload();
     }},
     { label: 'Cài đặt', click: () => showSettingsWindow() },
     { type: 'separator' },
@@ -533,6 +524,20 @@ function showExistingInstance() {
   updateMessengerAwayMode();
 }
 
+function toggleMainWindowVisibility() {
+  if (!mainWindow) return;
+  if (mainWindow.isVisible() && mainWindow.isFocused()) {
+    mainWindow.hide();
+  } else {
+    showExistingInstance();
+  }
+}
+
+function getActiveWebContents() {
+  if (!activeProfileId || !browserViews[activeProfileId]) return null;
+  return browserViews[activeProfileId].webContents;
+}
+
 function isMessengerAwayModeActive() {
   if (!mainWindow || mainWindow.isDestroyed()) return false;
   return !mainWindow.isVisible() || mainWindow.isMinimized();
@@ -557,6 +562,13 @@ function updateProfileUnreadCount(profileId, count, messageInfo = null) {
   profileUnreadCounts[profileId] = normalizedCount;
   sendProfileBadge(profileId, normalizedCount);
 }
+
+const MESSENGER_UNREAD_SELECTORS = [
+  '[data-testid="MWJewelThreadListUnread"]',
+  '[aria-label*="unread"]',
+  '[aria-label*="ch\u01b0a \u0111\u1ecdc"]',
+  'span.pq6dq46d',
+];
 
 function parseUnreadCountFromTitle(title) {
   const match = String(title || '').match(/\((\d+)\)/);
@@ -675,23 +687,18 @@ function buildMessengerUnreadObserverScript() {
       if (window.__messengerUnreadObserverInstalled) return;
       window.__messengerUnreadObserverInstalled = true;
 
+      ${parseUnreadCountFromTitle.toString()}
+      var unreadSelectors = ${JSON.stringify(MESSENGER_UNREAD_SELECTORS)};
+
       var lastSignature = '';
       var pendingTimer = null;
 
       function readUnreadCount() {
-        var title = document.title || '';
-        var titleMatch = title.match(/\\((\\d+)\\)/);
-        if (titleMatch) return parseInt(titleMatch[1], 10);
-
-        var selectors = [
-          '[data-testid="MWJewelThreadListUnread"]',
-          '[aria-label*="unread"]',
-          '[aria-label*="chưa đọc"]',
-          'span.pq6dq46d'
-        ];
+        var titleCount = parseUnreadCountFromTitle(document.title);
+        if (titleCount !== null) return titleCount;
 
         var total = 0;
-        selectors.forEach(function(selector) {
+        unreadSelectors.forEach(function(selector) {
           document.querySelectorAll(selector).forEach(function(node) {
             var label = node.getAttribute('aria-label') || '';
             var text = node.textContent || '';
@@ -771,15 +778,8 @@ function buildMessengerUnreadObserverScript() {
       }
 
       function readLastMessageInfo() {
-        var selectors = [
-          '[data-testid="MWJewelThreadListUnread"]',
-          '[aria-label*="unread"]',
-          '[aria-label*="chưa đọc"]',
-          'span.pq6dq46d'
-        ];
-
-        for (var i = 0; i < selectors.length; i += 1) {
-          var nodes = document.querySelectorAll(selectors[i]);
+        for (var i = 0; i < unreadSelectors.length; i += 1) {
+          var nodes = document.querySelectorAll(unreadSelectors[i]);
           for (var j = 0; j < nodes.length; j += 1) {
             var container = findThreadContainer(nodes[j]);
             var info = parseMessageInfoFromText(container && (container.innerText || container.textContent));
@@ -990,14 +990,20 @@ function decodeCdpWebSocketPayload(frame = {}) {
   return payloadData;
 }
 
-function isPrivacyHostUrl(url) {
+function parseUrlOrNull(url) {
   try {
-    const host = new URL(url).hostname.toLowerCase();
-    return host === 'facebook.com' || host.endsWith('.facebook.com')
-      || host === 'messenger.com' || host.endsWith('.messenger.com');
+    return new URL(url);
   } catch {
-    return false;
+    return null;
   }
+}
+
+function isPrivacyHostUrl(url) {
+  const parsed = parseUrlOrNull(url);
+  if (!parsed) return false;
+  const host = parsed.hostname.toLowerCase();
+  return host === 'facebook.com' || host.endsWith('.facebook.com')
+    || host === 'messenger.com' || host.endsWith('.messenger.com');
 }
 
 async function setupPrivacyNetworkDebugger(contents) {
@@ -1388,9 +1394,6 @@ function setUpdateTrayState(nextState = {}) {
   };
   updateTrayMenu();
   sendSettingsPanelState();
-  if (tray) {
-    tray.setToolTip(buildTrayTooltip());
-  }
 }
 
 function startUpdateDownload() {
@@ -1625,14 +1628,10 @@ const MESSENGER_HOSTS = ['facebook.com', 'messenger.com', 'fbcdn.net'];
 function isAllowedHttpsHost(url, hosts) {
   if (!url) return false;
 
-  try {
-    const parsed = new URL(url);
-    if (parsed.protocol !== 'https:') return false;
-    const host = parsed.hostname.toLowerCase();
-    return hosts.some((allowedHost) => host === allowedHost || host.endsWith(`.${allowedHost}`));
-  } catch {
-    return false;
-  }
+  const parsed = parseUrlOrNull(url);
+  if (!parsed || parsed.protocol !== 'https:') return false;
+  const host = parsed.hostname.toLowerCase();
+  return hosts.some((allowedHost) => host === allowedHost || host.endsWith(`.${allowedHost}`));
 }
 
 function isSafeDownloadPath(filePath) {
@@ -1767,6 +1766,19 @@ function getMessengerPopupOptions(partition, service = SERVICE_MESSENGER) {
     autoHideMenuBar: true,
     webPreferences: getPartitionWebPreferences(partition, service),
   };
+}
+
+function installDevToolsPolicy(contents) {
+  if (app.isPackaged) {
+    contents.on('before-input-event', (event, input) => {
+      if (input.key === 'F12' || (input.control && input.shift && input.key === 'I')) event.preventDefault();
+    });
+    contents.on('devtools-opened', () => contents.closeDevTools());
+  } else {
+    contents.on('before-input-event', (event, input) => {
+      if (input.key === 'F12' || (input.control && input.shift && input.key === 'I')) contents.toggleDevTools();
+    });
+  }
 }
 
 async function setupWebContents(contents, profileId, partition, options = {}) {
@@ -1917,12 +1929,10 @@ async function setupWebContents(contents, profileId, partition, options = {}) {
       const titleRevision = unreadTitleRevision;
       const count = await contents.executeJavaScript(`
         (function() {
-          var title = document.title || '';
-          var match = title.match(/\\((\\d+)\\)/);
-          if (match) return parseInt(match[1]);
-          var badges = document.querySelectorAll(
-            '[data-testid="MWJewelThreadListUnread"], [aria-label*="unread"], [aria-label*="chưa đọc"], span.pq6dq46d'
-          );
+          ${parseUnreadCountFromTitle.toString()}
+          var titleCount = parseUnreadCountFromTitle(document.title);
+          if (titleCount !== null) return titleCount;
+          var badges = document.querySelectorAll(${JSON.stringify(MESSENGER_UNREAD_SELECTORS.join(', '))});
           var total = 0;
           badges.forEach(function(b) {
             var source = b.textContent || b.getAttribute('aria-label') || '';
@@ -1941,16 +1951,7 @@ async function setupWebContents(contents, profileId, partition, options = {}) {
   trackWebContentsInterval(contents, unreadInterval);
   }
 
-  if (app.isPackaged) {
-    contents.on('before-input-event', (event, input) => {
-      if (input.key === 'F12' || (input.control && input.shift && input.key === 'I')) event.preventDefault();
-    });
-    contents.on('devtools-opened', () => contents.closeDevTools());
-  } else {
-    contents.on('before-input-event', (event, input) => {
-      if (input.key === 'F12' || (input.control && input.shift && input.key === 'I')) contents.toggleDevTools();
-    });
-  }
+  installDevToolsPolicy(contents);
 
   return privacyScriptIdentifier;
 }
@@ -2018,16 +2019,7 @@ function createWindow() {
 
   mainWindow.loadFile('index.html');
 
-  if (app.isPackaged) {
-    mainWindow.webContents.on('before-input-event', (event, input) => {
-      if (input.key === 'F12' || (input.control && input.shift && input.key === 'I')) event.preventDefault();
-    });
-    mainWindow.webContents.on('devtools-opened', () => mainWindow.webContents.closeDevTools());
-  } else {
-    mainWindow.webContents.on('before-input-event', (event, input) => {
-      if (input.key === 'F12' || (input.control && input.shift && input.key === 'I')) mainWindow.webContents.toggleDevTools();
-    });
-  }
+  installDevToolsPolicy(mainWindow.webContents);
 
   mainWindow.on('focus', () => {
     mainWindow.flashFrame(false);
@@ -2305,39 +2297,32 @@ function createWindow() {
   });
 
   ipcMain.on('zoom-in', () => {
-    if (activeProfileId && browserViews[activeProfileId]) {
-      const wc = browserViews[activeProfileId].webContents;
-      wc.setZoomLevel(wc.getZoomLevel() + 0.5);
-    }
+    const contents = getActiveWebContents();
+    if (contents) contents.setZoomLevel(contents.getZoomLevel() + 0.5);
   });
 
   ipcMain.on('zoom-out', () => {
-    if (activeProfileId && browserViews[activeProfileId]) {
-      const wc = browserViews[activeProfileId].webContents;
-      wc.setZoomLevel(wc.getZoomLevel() - 0.5);
-    }
+    const contents = getActiveWebContents();
+    if (contents) contents.setZoomLevel(contents.getZoomLevel() - 0.5);
   });
 
   ipcMain.on('reload-page', () => {
-    if (activeProfileId && browserViews[activeProfileId]) {
-      browserViews[activeProfileId].webContents.reload();
-    }
+    const contents = getActiveWebContents();
+    if (contents) contents.reload();
   });
 
   ipcMain.on('go-home', () => {
-    if (activeProfileId && browserViews[activeProfileId]) {
-      const service = normalizeService(profileServices[activeProfileId] || settings.activeService);
-      browserViews[activeProfileId].webContents.loadURL(getServiceHomeUrl(service), {
-        userAgent: getServiceUserAgent(service),
-      });
-    }
+    const contents = getActiveWebContents();
+    if (!contents) return;
+    const service = normalizeService(profileServices[activeProfileId] || settings.activeService);
+    contents.loadURL(getServiceHomeUrl(service), {
+      userAgent: getServiceUserAgent(service),
+    });
   });
 
   ipcMain.on('go-back', () => {
-    if (activeProfileId && browserViews[activeProfileId]) {
-      const wc = browserViews[activeProfileId].webContents;
-      if (wc.canGoBack()) wc.goBack();
-    }
+    const contents = getActiveWebContents();
+    if (contents && contents.canGoBack()) contents.goBack();
   });
 
   ipcMain.on('get-settings', (event) => {
@@ -2424,14 +2409,7 @@ function updateBadge(count) {
 function registerGlobalShortcuts() {
   const hotkey = settings.globalHotkey || 'Ctrl+Shift+M';
   try {
-    globalShortcut.register(hotkey, () => {
-      if (!mainWindow) return;
-      if (mainWindow.isVisible() && mainWindow.isFocused()) {
-        mainWindow.hide();
-      } else {
-        showExistingInstance();
-      }
-    });
+    globalShortcut.register(hotkey, toggleMainWindowVisibility);
   } catch (err) {}
 }
 
