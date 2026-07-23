@@ -153,6 +153,8 @@ let browserViews = {}; // { profileId: BrowserView }
 let webContentsIntervals = new Map(); // webContents.id -> Set<Timeout>
 let webContentsProfiles = new Map(); // webContents.id -> profileId
 let privacyScriptIdentifiers = new Map(); // webContents.id -> CDP script identifier
+let privacyProtectedContents = new Map(); // webContents.id -> Messenger WebContents
+let privacyOperationQueues = new Map(); // webContents.id -> Promise
 let activeProfileId = null;
 let profileSleepTimers = new Map();
 let updateTrayState = {
@@ -550,6 +552,7 @@ function updateProfileUnreadCount(profileId, count, messageInfo = null) {
   if (isMessengerAwayModeActive() && previousCount > 0 && normalizedCount === 0 && !messageInfo) {
     return;
   }
+  if (previousCount === normalizedCount) return;
 
   profileUnreadCounts[profileId] = normalizedCount;
   sendProfileBadge(profileId, normalizedCount);
@@ -561,9 +564,7 @@ function parseUnreadCountFromTitle(title) {
 }
 
 function updateMessengerAwayMode() {
-  // Privacy away-mode only applies to Messenger sessions
-  if (normalizeService(settings.activeService) !== SERVICE_MESSENGER) return;
-  updatePagePrivacyProtection();
+  return updatePagePrivacyProtection();
 }
 
 function buildMessengerProfileAvatarScript() {
@@ -825,13 +826,6 @@ function buildMessengerUnreadObserverScript() {
         });
       }
 
-      new MutationObserver(function() { scheduleReport('dom'); }).observe(document.documentElement, {
-        childList: true,
-        characterData: true,
-        subtree: true
-      });
-
-      setInterval(function() { report('fast-timer'); }, 1000);
       report('init');
     })();
   `;
@@ -849,6 +843,47 @@ function getPrivacySettings() {
     blockSeen: settings.blockSeen || isMessengerAwayModeActive(),
     blockTyping: settings.blockTyping,
   };
+}
+
+
+function isPrivacyProtectionEnabled(privacySettings = getPrivacySettings()) {
+  return !!(settings.blockSeen || settings.blockTyping)
+    && !!(privacySettings?.blockSeen || privacySettings?.blockTyping);
+}
+
+function enqueuePrivacyOperation(contents, operation) {
+  if (!contents || contents.isDestroyed()) return Promise.resolve(null);
+
+  const contentsId = contents.id;
+  const previous = privacyOperationQueues.get(contentsId) || Promise.resolve();
+  const current = previous.catch(() => {}).then(operation);
+  privacyOperationQueues.set(contentsId, current);
+
+  const clearQueue = () => {
+    if (privacyOperationQueues.get(contentsId) === current) {
+      privacyOperationQueues.delete(contentsId);
+    }
+  };
+  current.then(clearQueue, clearQueue);
+  return current;
+}
+
+function trackPrivacyWebContents(contents) {
+  if (!contents || contents.isDestroyed() || privacyProtectedContents.has(contents.id)) return;
+
+  privacyProtectedContents.set(contents.id, contents);
+  contents.once('destroyed', () => {
+    privacyNetworkDebuggerCleanups.get(contents.id)?.();
+    privacyProtectedContents.delete(contents.id);
+    privacyOperationQueues.delete(contents.id);
+    privacyScriptIdentifiers.delete(contents.id);
+    privacyNetworkDebuggerContents.delete(contents.id);
+    privacyNetworkDebuggerCleanups.delete(contents.id);
+    privacyDebuggerOwnedContents.delete(contents.id);
+    privacyNetworkDebuggerOwnedContents.delete(contents.id);
+    privacyWorkerSessionsByContents.delete(contents.id);
+    privacyWebSocketUrlsByContents.delete(contents.id);
+  });
 }
 
 const PRIVACY_DEBUG_LOG = path.join(app.getPath('userData'), 'privacy-debug.log');
@@ -935,7 +970,10 @@ function buildTrayTooltip() {
 }
 
 const privacyNetworkDebuggerContents = new Set();
-const privacyWebSocketUrls = new Map();
+const privacyNetworkDebuggerCleanups = new Map();
+const privacyDebuggerOwnedContents = new Set();
+const privacyNetworkDebuggerOwnedContents = new Set();
+const privacyWebSocketUrlsByContents = new Map();
 const privacyWorkerSessionsByContents = new Map();
 let privacyWebSocketSampleCount = 0;
 const MAX_PRIVACY_WEBSOCKET_SAMPLES = 160;
@@ -963,23 +1001,53 @@ function isPrivacyHostUrl(url) {
 }
 
 async function setupPrivacyNetworkDebugger(contents) {
-  if (!contents || contents.isDestroyed() || privacyNetworkDebuggerContents.has(contents.id)) return;
+  if (!contents || contents.isDestroyed()) return false;
 
   const debuggerApi = contents.debugger;
+  if (!debuggerApi) return false;
+
+  if (privacyNetworkDebuggerContents.has(contents.id)) {
+    let isAttached = false;
+    try {
+      isAttached = debuggerApi.isAttached();
+    } catch {}
+    if (isAttached) return true;
+    privacyNetworkDebuggerCleanups.get(contents.id)?.();
+  }
+
   const workerSessions = new Set();
+  const websocketUrls = new Map();
   privacyWorkerSessionsByContents.set(contents.id, workerSessions);
+  privacyWebSocketUrlsByContents.set(contents.id, websocketUrls);
   privacyNetworkDebuggerContents.add(contents.id);
 
+  let cleanedUp = false;
+  let onDebuggerMessage = null;
+  let onDebuggerDetach = null;
   const cleanup = () => {
+    if (cleanedUp) return;
+    cleanedUp = true;
+
     privacyNetworkDebuggerContents.delete(contents.id);
+    if (privacyNetworkDebuggerCleanups.get(contents.id) === cleanup) {
+      privacyNetworkDebuggerCleanups.delete(contents.id);
+    }
+    privacyNetworkDebuggerOwnedContents.delete(contents.id);
     privacyWorkerSessionsByContents.delete(contents.id);
+    privacyWebSocketUrlsByContents.delete(contents.id);
+    workerSessions.clear();
+    websocketUrls.clear();
+
     try {
-      debuggerApi.removeListener('message', onDebuggerMessage);
+      if (onDebuggerMessage) debuggerApi.removeListener('message', onDebuggerMessage);
+    } catch {}
+    try {
+      if (onDebuggerDetach) debuggerApi.removeListener('detach', onDebuggerDetach);
     } catch {}
   };
 
   const installWorkerPrivacyPatch = async (sessionId, targetInfo = {}) => {
-    if (!sessionId) return;
+    if (!sessionId || cleanedUp) return;
     try {
       workerSessions.add(sessionId);
       await debuggerApi.sendCommand('Runtime.enable', {}, sessionId);
@@ -1010,7 +1078,8 @@ async function setupPrivacyNetworkDebugger(contents) {
     );
   };
 
-  const onDebuggerMessage = (event, method, params = {}, sessionId = '') => {
+  onDebuggerMessage = (event, method, params = {}, sessionId = '') => {
+    if (cleanedUp) return;
     const privacySettings = getPrivacySettings();
 
     if (method === 'Target.attachedToTarget') {
@@ -1029,17 +1098,17 @@ async function setupPrivacyNetworkDebugger(contents) {
     }
 
     if (method === 'Network.webSocketCreated') {
-      if (params.requestId && params.url) privacyWebSocketUrls.set(params.requestId, params.url);
+      if (params.requestId && params.url) websocketUrls.set(params.requestId, params.url);
       return;
     }
 
     if (method === 'Network.webSocketClosed') {
-      if (params.requestId) privacyWebSocketUrls.delete(params.requestId);
+      if (params.requestId) websocketUrls.delete(params.requestId);
       return;
     }
 
     if (method === 'Network.webSocketFrameSent') {
-      const url = privacyWebSocketUrls.get(params.requestId) || 'wss://unknown';
+      const url = websocketUrls.get(params.requestId) || 'wss://unknown';
       const payload = decodeCdpWebSocketPayload(params.response);
       const debugInfo = extractMessengerRequestInfo(url, payload, privacySettings);
       const wsShouldBlock = shouldBlockMessengerWebSocketSend(url, payload, privacySettings);
@@ -1067,63 +1136,218 @@ async function setupPrivacyNetworkDebugger(contents) {
 
     if (!request.postData && request.hasPostData && params.requestId) {
       debuggerApi.sendCommand('Network.getRequestPostData', { requestId: params.requestId })
-        .then((result) => writeCdpHttpLog(request, result?.postData || '', privacySettings))
-        .catch(() => writeCdpHttpLog(request, '', privacySettings));
+        .then((result) => {
+          if (!cleanedUp) writeCdpHttpLog(request, result?.postData || '', privacySettings);
+        })
+        .catch(() => {
+          if (!cleanedUp) writeCdpHttpLog(request, '', privacySettings);
+        });
       return;
     }
 
     writeCdpHttpLog(request, request.postData || '', privacySettings);
   };
 
+  onDebuggerDetach = (_event, reason) => {
+    privacyDebugLog(`[CDP] Debugger detached for contents.id=${contents.id}. Reason=${reason || '?'}`);
+    privacyScriptIdentifiers.delete(contents.id);
+    privacyDebuggerOwnedContents.delete(contents.id);
+    cleanup();
+  };
+
+  privacyNetworkDebuggerCleanups.set(contents.id, cleanup);
   try {
     debuggerApi.on('message', onDebuggerMessage);
-    contents.once('destroyed', cleanup);
+    debuggerApi.on('detach', onDebuggerDetach);
     await debuggerApi.sendCommand('Network.enable');
+    privacyNetworkDebuggerOwnedContents.add(contents.id);
     privacyDebugLog(`[CDP] Network probe installed for contents.id=${contents.id}`);
+    return true;
   } catch (err) {
     cleanup();
     privacyDebugLog(`[CDP ERROR] Failed to install network probe: ${err.message}`);
+    return false;
   }
 }
 
-function updateWorkerPrivacyProtection(contents, privacySettings) {
+async function disablePrivacyProtectionNow(contents) {
+  if (!contents) return null;
+
+  const contentsId = contents.id;
+  const debuggerApi = contents.debugger;
+  const scriptIdentifier = privacyScriptIdentifiers.get(contentsId);
+  const networkEnabled = privacyNetworkDebuggerOwnedContents.has(contentsId);
+  const debuggerOwned = privacyDebuggerOwnedContents.has(contentsId);
+  let isAttached = false;
+
+  try {
+    isAttached = !contents.isDestroyed() && !!debuggerApi?.isAttached();
+  } catch {}
+
+  if (isAttached && scriptIdentifier) {
+    try {
+      await debuggerApi.sendCommand('Page.removeScriptToEvaluateOnNewDocument', {
+        identifier: scriptIdentifier,
+      });
+    } catch (err) {
+      privacyDebugLog(`[CDP ERROR] Failed to remove privacy script: ${err.message}`);
+    }
+  }
+
+  if (isAttached && networkEnabled) {
+    try {
+      await debuggerApi.sendCommand('Network.disable');
+    } catch (err) {
+      privacyDebugLog(`[CDP ERROR] Failed to disable network probe: ${err.message}`);
+    }
+  }
+
+  const cleanup = privacyNetworkDebuggerCleanups.get(contentsId);
+  if (cleanup) {
+    cleanup();
+  } else {
+    privacyNetworkDebuggerContents.delete(contentsId);
+    privacyNetworkDebuggerOwnedContents.delete(contentsId);
+    privacyWorkerSessionsByContents.delete(contentsId);
+    privacyWebSocketUrlsByContents.delete(contentsId);
+  }
+
+  privacyScriptIdentifiers.delete(contentsId);
+  privacyNetworkDebuggerOwnedContents.delete(contentsId);
+  privacyDebuggerOwnedContents.delete(contentsId);
+
+  if (debuggerOwned && isAttached) {
+    try {
+      debuggerApi.detach();
+    } catch (err) {
+      privacyDebugLog(`[CDP ERROR] Failed to detach debugger: ${err.message}`);
+    }
+  }
+
+  return null;
+}
+
+async function enablePrivacyProtectionNow(contents, privacySettings) {
+  if (!contents || contents.isDestroyed()) return null;
+
+  const contentsId = contents.id;
+  const debuggerApi = contents.debugger;
+  let attachedByPrivacy = false;
+
+  try {
+    const previousIdentifier = privacyScriptIdentifiers.get(contentsId) || null;
+    privacyDebugLog(`[CDP] Attempting to attach debugger for contents.id=${contentsId}. Previous identifier=${previousIdentifier}`);
+
+    if (!debuggerApi.isAttached()) {
+      debuggerApi.attach('1.3');
+      attachedByPrivacy = true;
+      privacyDebuggerOwnedContents.add(contentsId);
+      privacyDebugLog(`[CDP] Debugger attached successfully for contents.id=${contentsId}`);
+    }
+
+    await setupPrivacyNetworkDebugger(contents);
+    if (!debuggerApi.isAttached()) {
+      throw new Error('Debugger detached before privacy script registration');
+    }
+
+    const identifier = await registerPrivacyScriptForNewDocuments(
+      debuggerApi,
+      privacySettings,
+      previousIdentifier,
+    );
+
+    if (identifier) {
+      privacyScriptIdentifiers.set(contentsId, identifier);
+      privacyDebugLog(`[CDP] Privacy script registered on new documents successfully. Identifier=${identifier}`);
+    } else {
+      privacyDebugLog('[CDP] Privacy script registration returned null identifier');
+    }
+    return identifier;
+  } catch (err) {
+    privacyDebugLog(`[CDP ERROR] Failed to register privacy script: ${err.message}\nStack: ${err.stack}`);
+    if (attachedByPrivacy || privacyDebuggerOwnedContents.has(contentsId)) {
+      await disablePrivacyProtectionNow(contents);
+    } else {
+      privacyNetworkDebuggerCleanups.get(contentsId)?.();
+      privacyScriptIdentifiers.delete(contentsId);
+    }
+    return null;
+  }
+}
+
+async function reconcilePrivacyProtectionNow(contents, privacySettings) {
+  if (!isPrivacyProtectionEnabled(privacySettings)) {
+    return disablePrivacyProtectionNow(contents);
+  }
+  return enablePrivacyProtectionNow(contents, privacySettings);
+}
+
+async function updateWorkerPrivacyProtection(contents, privacySettings) {
   if (!contents || contents.isDestroyed()) return;
   const workerSessions = privacyWorkerSessionsByContents.get(contents.id);
   if (!workerSessions || workerSessions.size === 0) return;
 
-  workerSessions.forEach((sessionId) => {
-    contents.debugger.sendCommand('Runtime.evaluate', {
-      expression: buildPrivacyWorkerPatchScript(privacySettings),
-    }, sessionId).catch((err) => {
+  await Promise.all([...workerSessions].map(async (sessionId) => {
+    try {
+      await contents.debugger.sendCommand('Runtime.evaluate', {
+        expression: buildPrivacyWorkerPatchScript(privacySettings),
+      }, sessionId);
+    } catch (err) {
       privacyDebugLog(`[CDP ERROR] Failed to update worker privacy settings: ${err.message}`);
-    });
-  });
+    }
+  }));
 }
 
-function updatePagePrivacyProtection() {
-  const privacySettings = getPrivacySettings();
-  Object.values(browserViews).forEach((view) => {
-    const contents = view?.webContents;
-    if (!contents || contents.isDestroyed()) return;
-    registerPrivacyScript(contents, privacySettings);
-    updateWorkerPrivacyProtection(contents, privacySettings);
+async function applyPrivacySettingsNow(contents, privacySettings) {
+  const shouldEnable = isPrivacyProtectionEnabled(privacySettings);
+  if (!shouldEnable) {
+    await updateWorkerPrivacyProtection(contents, privacySettings);
+  }
+
+  const identifier = await reconcilePrivacyProtectionNow(contents, privacySettings);
+  if (!contents || contents.isDestroyed()) return identifier;
+
+  if (shouldEnable) {
+    await updateWorkerPrivacyProtection(contents, privacySettings);
+  }
+  try {
     contents.send('privacy-settings-updated', privacySettings);
-    contents.executeJavaScript(buildPrivacyPatchScript(privacySettings)).catch(() => {});
+  } catch {}
+  try {
+    await contents.executeJavaScript(buildPrivacyPatchScript(privacySettings));
+  } catch {}
+  return identifier;
+}
+
+function updatePagePrivacyProtection(privacySettings = getPrivacySettings()) {
+  const updates = [];
+  privacyProtectedContents.forEach((contents, contentsId) => {
+    if (!contents || contents.isDestroyed()) {
+      privacyProtectedContents.delete(contentsId);
+      return;
+    }
+    updates.push(enqueuePrivacyOperation(
+      contents,
+      () => applyPrivacySettingsNow(contents, privacySettings),
+    ));
   });
+  return Promise.all(updates);
 }
 
 function toggleBlockSeen(enable) {
   settings.blockSeen = enable;
   saveSettings(settings);
-  updateMessengerAwayMode();
+  const updatePromise = updatePagePrivacyProtection(getPrivacySettings());
   sendSettingsPanelState();
+  return updatePromise;
 }
 
 function toggleBlockTyping(enable) {
   settings.blockTyping = enable;
   saveSettings(settings);
-  updatePagePrivacyProtection();
+  const updatePromise = updatePagePrivacyProtection(getPrivacySettings());
   sendSettingsPanelState();
+  return updatePromise;
 }
 
 // ============================================================
@@ -1515,46 +1739,20 @@ function isExternalWebUrl(url) {
 
 async function registerPrivacyScript(contents, privacySettings = getPrivacySettings()) {
   if (!contents || contents.isDestroyed()) return null;
-
-  try {
-    const previousIdentifier = privacyScriptIdentifiers.get(contents.id) || null;
-    privacyDebugLog(`[CDP] Attempting to attach debugger for contents.id=${contents.id}. Previous identifier=${previousIdentifier}`);
-
-    if (!contents.debugger.isAttached()) {
-      contents.debugger.attach('1.3');
-      privacyDebugLog(`[CDP] Debugger attached successfully for contents.id=${contents.id}`);
-    }
-
-    await setupPrivacyNetworkDebugger(contents);
-
-    const identifier = await registerPrivacyScriptForNewDocuments(
-      contents.debugger,
-      privacySettings,
-      previousIdentifier,
-    );
-
-    if (identifier) {
-      if (!previousIdentifier) {
-        contents.once('destroyed', () => privacyScriptIdentifiers.delete(contents.id));
-      }
-      privacyScriptIdentifiers.set(contents.id, identifier);
-      privacyDebugLog(`[CDP] Privacy script registered on new documents successfully. Identifier=${identifier}`);
-    } else {
-      privacyDebugLog(`[CDP] Privacy script registration returned null identifier`);
-    }
-    return identifier;
-  } catch (err) {
-    privacyDebugLog(`[CDP ERROR] Failed to register privacy script: ${err.message}\nStack: ${err.stack}`);
-    return null;
-  }
+  trackPrivacyWebContents(contents);
+  return enqueuePrivacyOperation(
+    contents,
+    () => reconcilePrivacyProtectionNow(contents, privacySettings),
+  );
 }
 
 async function preparePrivacyScript(contents) {
   if (!contents || contents.isDestroyed()) return null;
-  if (!contents.getURL()) {
+  const privacySettings = getPrivacySettings();
+  if (isPrivacyProtectionEnabled(privacySettings) && !contents.getURL()) {
     await contents.loadURL('about:blank');
   }
-  return registerPrivacyScript(contents);
+  return registerPrivacyScript(contents, privacySettings);
 }
 
 function getMessengerPopupOptions(partition, service = SERVICE_MESSENGER) {
@@ -1578,6 +1776,7 @@ async function setupWebContents(contents, profileId, partition, options = {}) {
       || SERVICE_MESSENGER
   );
   const isMessengerService = service === SERVICE_MESSENGER;
+  if (isMessengerService) trackPrivacyWebContents(contents);
   const homeUrl = getServiceHomeUrl(service);
   const userAgent = getServiceUserAgent(service);
 
@@ -1682,8 +1881,10 @@ async function setupWebContents(contents, profileId, partition, options = {}) {
     installMessengerUnreadObserver(contents);
   });
 
+  let unreadTitleRevision = 0;
   contents.on('page-title-updated', (event, title) => {
     if (!isMessengerService) return;
+    unreadTitleRevision += 1;
     const count = parseUnreadCountFromTitle(title);
     if (count !== null) {
       updateProfileUnreadCount(profileId, count);
@@ -1712,20 +1913,27 @@ async function setupWebContents(contents, profileId, partition, options = {}) {
       return;
     }
     try {
+      const titleRevision = unreadTitleRevision;
       const count = await contents.executeJavaScript(`
         (function() {
           var title = document.title || '';
           var match = title.match(/\\((\\d+)\\)/);
           if (match) return parseInt(match[1]);
-          var badges = document.querySelectorAll('[data-testid="MWJewelThreadListUnread"], span.pq6dq46d');
+          var badges = document.querySelectorAll(
+            '[data-testid="MWJewelThreadListUnread"], [aria-label*="unread"], [aria-label*="chưa đọc"], span.pq6dq46d'
+          );
           var total = 0;
           badges.forEach(function(b) {
-            var n = parseInt(b.textContent);
+            var source = b.textContent || b.getAttribute('aria-label') || '';
+            var match = source.match(/\d+/);
+            if (!match) return;
+            var n = parseInt(match[0], 10);
             if (!isNaN(n)) total += n;
           });
           return total;
         })();
       `);
+      if (titleRevision !== unreadTitleRevision) return;
       updateProfileUnreadCount(profileId, count || 0);
     } catch(e) {}
   }, 1000);
@@ -1919,7 +2127,7 @@ function createWindow() {
   ipcMain.handle('settings:get-state', () => getSettingsPanelState());
   ipcMain.on('open-settings', () => showSettingsWindow());
 
-  ipcMain.handle('settings:set-option', (event, { key, value } = {}) => {
+  ipcMain.handle('settings:set-option', async (event, { key, value } = {}) => {
     const enabled = !!value;
     if (key === 'autoLaunch') {
       toggleAutoLaunch(enabled);
@@ -1942,9 +2150,9 @@ function createWindow() {
       }
       sendSettingsPanelState();
     } else if (key === 'blockSeen') {
-      toggleBlockSeen(enabled);
+      await toggleBlockSeen(enabled);
     } else if (key === 'blockTyping') {
-      toggleBlockTyping(enabled);
+      await toggleBlockTyping(enabled);
     }
     return getSettingsPanelState();
   });
