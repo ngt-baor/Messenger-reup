@@ -90,7 +90,15 @@ optionMap.forEach((key, input) => {
 
 fields.updateAction.addEventListener('click', async () => {
   fields.updateAction.disabled = true;
-  renderState(await window.settingsApi.updateAction());
+  try {
+    renderState(await window.settingsApi.updateAction());
+  } catch (error) {
+    fields.updateStatus.textContent = `Lỗi cập nhật: ${error?.message || 'Không thể thực hiện cập nhật.'}`;
+    fields.updateBadge.textContent = 'Có lỗi';
+    fields.updateBadge.className = 'status-badge error';
+    fields.updateAction.textContent = 'Kiểm tra lại';
+    fields.updateAction.disabled = false;
+  }
 });
 
 fields.clearCache.addEventListener('click', async () => {
