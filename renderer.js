@@ -102,7 +102,6 @@ function switchService(service) {
     return;
   }
   activeService = next;
-  updateServiceButtons();
   const list = profilesForService(next);
   if (list.length === 0) {
     // Empty service: show empty state; user thêm nick bằng +
@@ -202,6 +201,12 @@ resizeObserver.observe(profilesList);
 // ============================================================
 //  RENDER SIDEBAR
 // ============================================================
+function updateProfileBadgeElement(badge, count) {
+  if (!badge) return;
+  badge.innerText = count > 9 ? '9+' : String(count);
+  badge.style.display = count > 0 ? 'block' : 'none';
+}
+
 function renderSidebar() {
   profilesList.innerHTML = '';
   const visible = profilesForService(activeService);
@@ -250,9 +255,7 @@ function renderSidebar() {
     if (normalizeService(p.service) === SERVICE_DISCORD) {
       badge.style.display = 'none';
     } else if (profileBadgeCounts[p.id] > 0) {
-      const count = profileBadgeCounts[p.id];
-      badge.innerText = count > 9 ? '9+' : String(count);
-      badge.style.display = 'block';
+      updateProfileBadgeElement(badge, profileBadgeCounts[p.id]);
     }
     btn.appendChild(badge);
     
@@ -292,6 +295,12 @@ const avatarPreview = document.getElementById('avatar-preview');
 const avatarImg = document.getElementById('avatar-img');
 const avatarLetter = document.getElementById('avatar-letter');
 const avatarInput = document.getElementById('avatar-input');
+
+function closeProfileModal(beforeRestoreBrowserView) {
+  modalOverlay.style.display = 'none';
+  if (beforeRestoreBrowserView) beforeRestoreBrowserView();
+  ipcRenderer.send('set-browserview-visibility', true);
+}
 
 function openModal(profileToEdit = null) {
   ipcRenderer.send('set-browserview-visibility', false);
@@ -364,15 +373,11 @@ document.getElementById('modal-delete').onclick = () => {
     } else {
       renderSidebar();
     }
-    modalOverlay.style.display = 'none';
-    ipcRenderer.send('set-browserview-visibility', true);
+    closeProfileModal();
   }
 };
 
-document.getElementById('modal-cancel').onclick = () => {
-  modalOverlay.style.display = 'none';
-  ipcRenderer.send('set-browserview-visibility', true);
-};
+document.getElementById('modal-cancel').onclick = () => closeProfileModal();
 
 document.getElementById('modal-save').onclick = () => {
   const name = nameInput.value.trim();
@@ -399,9 +404,7 @@ document.getElementById('modal-save').onclick = () => {
   }
   
   saveProfiles();
-  modalOverlay.style.display = 'none';
-  renderSidebar();
-  ipcRenderer.send('set-browserview-visibility', true);
+  closeProfileModal(editingProfile ? renderSidebar : null);
   if (!editingProfile) switchProfile(activeProfileId);
 };
 
@@ -436,12 +439,12 @@ ipcRenderer.on('logout-profile-done', (event, { id, success }) => {
     logoutBtn.style.color = '#51cf66';
     logoutBtn.style.borderColor = '#51cf66';
     setTimeout(() => {
-      modalOverlay.style.display = 'none';
-      logoutBtn.classList.remove('loading');
-      logoutBtn.style.color = '';
-      logoutBtn.style.borderColor = '';
-      renderSidebar();
-      ipcRenderer.send('set-browserview-visibility', true);
+      closeProfileModal(() => {
+        logoutBtn.classList.remove('loading');
+        logoutBtn.style.color = '';
+        logoutBtn.style.borderColor = '';
+        renderSidebar();
+      });
     }, 800);
   } else {
     logoutBtn.innerHTML = '<svg viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg> Lỗi, thử lại';
@@ -455,11 +458,15 @@ document.getElementById('btn-add-profile').onclick = () => openModal();
 //  RIGHT SIDEBAR TOOLBAR
 // ============================================================
 let isDarkMode = true;
-const toggleDarkMode = () => {
-  isDarkMode = !isDarkMode;
+function applyThemeUi() {
   document.body.className = isDarkMode ? 'dark-mode' : 'light-mode';
   document.getElementById('icon-sun').style.display = isDarkMode ? 'none' : 'block';
   document.getElementById('icon-moon').style.display = isDarkMode ? 'block' : 'none';
+}
+
+const toggleDarkMode = () => {
+  isDarkMode = !isDarkMode;
+  applyThemeUi();
   ipcRenderer.send('set-theme', isDarkMode);
 };
 document.getElementById('btn-dark-mode').onclick = toggleDarkMode;
@@ -504,10 +511,7 @@ ipcRenderer.on('update-profile-badge', (event, { id, count }) => {
     return;
   }
   const badge = document.getElementById(`badge-${id}`);
-  if (badge) {
-    badge.innerText = count > 9 ? '9+' : count;
-    badge.style.display = count > 0 ? 'block' : 'none';
-  }
+  updateProfileBadgeElement(badge, count);
   profileBadgeCounts[id] = count || 0;
   const totalCount = Object.values(profileBadgeCounts).reduce((a, b) => a + b, 0);
   ipcRenderer.send('update-badge', totalCount);
@@ -530,9 +534,7 @@ ipcRenderer.on('update-profile-avatar', (event, { id, avatarUrl }) => {
 // ============================================================
 const settings = bootSettings;
 isDarkMode = settings.isDarkMode;
-document.body.className = isDarkMode ? 'dark-mode' : 'light-mode';
-document.getElementById('icon-sun').style.display = isDarkMode ? 'none' : 'block';
-document.getElementById('icon-moon').style.display = isDarkMode ? 'block' : 'none';
+applyThemeUi();
 if(settings.alwaysOnTop) {
   document.getElementById('btn-pin').style.opacity = '1';
 }
@@ -540,12 +542,11 @@ if(settings.alwaysOnTop) {
 document.getElementById('btn-service-messenger').onclick = () => switchService(SERVICE_MESSENGER);
 document.getElementById('btn-service-discord').onclick = () => switchService(SERVICE_DISCORD);
 
-renderSidebar();
 ipcRenderer.send('profiles-updated', profiles);
 if (activeProfileId) {
   switchProfile(activeProfileId);
 } else {
-  updateServiceButtons();
+  renderSidebar();
 }
 
 // ============================================================
@@ -572,6 +573,11 @@ function saveLockSettings(patch) {
   ipcRenderer.send('save-lock-settings', patch);
 }
 
+function setLockMessage(text, state = '') {
+  lockMessage.textContent = text;
+  lockMessage.className = `lock-subtitle${state ? ` ${state}` : ''}`;
+}
+
 
 function hashPin(pin) {
   return crypto.createHash('sha256').update(pin + '_messlo_salt_2026').digest('hex');
@@ -587,12 +593,10 @@ function lockApp(mode) {
   updatePinDots();
 
   if (mode === 'setup') {
-    lockMessage.textContent = 'Tạo mã PIN mới (4 số)';
-    lockMessage.className = 'lock-subtitle';
+    setLockMessage('Tạo mã PIN mới (4 số)');
     lockDisableBtn.style.display = 'none';
   } else {
-    lockMessage.textContent = 'Nhập mã PIN để mở khoá';
-    lockMessage.className = 'lock-subtitle';
+    setLockMessage('Nhập mã PIN để mở khoá');
     lockDisableBtn.style.display = 'none';
   }
 }
@@ -635,8 +639,7 @@ function handlePinComplete() {
     lock.setupPin = lock.enteredPin;
     lock.enteredPin = '';
     lock.mode = 'confirm';
-    lockMessage.textContent = 'Xác nhận lại mã PIN';
-    lockMessage.className = 'lock-subtitle';
+    setLockMessage('Xác nhận lại mã PIN');
     updatePinDots();
 
   } else if (lock.mode === 'confirm') {
@@ -644,20 +647,17 @@ function handlePinComplete() {
     if (lock.enteredPin === lock.setupPin) {
       const hash = hashPin(lock.enteredPin);
       saveLockSettings({ enabled: true, hash });
-      lockMessage.textContent = 'Đã thiết lập mã PIN';
-      lockMessage.className = 'lock-subtitle success';
+      setLockMessage('Đã thiết lập mã PIN', 'success');
       setTimeout(unlockApp, 700);
     } else {
-      lockMessage.textContent = 'Không khớp! Nhập lại từ đầu';
-      lockMessage.className = 'lock-subtitle error';
+      setLockMessage('Không khớp! Nhập lại từ đầu', 'error');
       pinDotsContainer.classList.add('shake');
       setTimeout(() => {
         pinDotsContainer.classList.remove('shake');
         lock.mode = 'setup';
         lock.enteredPin = '';
         lock.setupPin = '';
-        lockMessage.textContent = 'Tạo mã PIN mới (4 số)';
-        lockMessage.className = 'lock-subtitle';
+        setLockMessage('Tạo mã PIN mới (4 số)');
         updatePinDots();
       }, 600);
     }
@@ -666,13 +666,11 @@ function handlePinComplete() {
     // Verify PIN
     const hash = hashPin(lock.enteredPin);
     if (hash === ls.hash) {
-      lockMessage.textContent = 'Đã mở khoá';
-      lockMessage.className = 'lock-subtitle success';
+      setLockMessage('Đã mở khoá', 'success');
       setTimeout(unlockApp, 300);
     } else {
       lock.wrongAttempts++;
-      lockMessage.textContent = `Sai mã PIN! (${lock.wrongAttempts}/5)`;
-      lockMessage.className = 'lock-subtitle error';
+      setLockMessage(`Sai mã PIN! (${lock.wrongAttempts}/5)`, 'error');
       pinDotsContainer.classList.add('shake');
       lock.enteredPin = '';
       setTimeout(() => {
@@ -681,12 +679,11 @@ function handlePinComplete() {
       }, 500);
 
       if (lock.wrongAttempts >= 5) {
-        lockMessage.textContent = 'Quá 5 lần sai. Đợi 30 giây...';
+        setLockMessage('Quá 5 lần sai. Đợi 30 giây...', 'error');
         pinKeys.forEach(k => k.disabled = true);
         setTimeout(() => {
           lock.wrongAttempts = 0;
-          lockMessage.textContent = 'Nhập mã PIN để mở khoá';
-          lockMessage.className = 'lock-subtitle';
+          setLockMessage('Nhập mã PIN để mở khoá');
           pinKeys.forEach(k => k.disabled = false);
         }, 30000);
       }
@@ -726,12 +723,26 @@ const lsTimeout = document.getElementById('ls-timeout');
 const lsChangePin = document.getElementById('ls-change-pin');
 const lsRemovePin = document.getElementById('ls-remove-pin');
 
+function syncLockSettingsControls() {
+  const enabled = lockSettings.enabled;
+  lsToggle.classList.toggle('on', enabled);
+  lsChangePin.style.display = enabled ? 'block' : 'none';
+  lsRemovePin.style.display = enabled ? 'block' : 'none';
+}
+
+function beginPinSetupFromSettings() {
+  lockSettingsOverlay.style.display = 'none';
+  lockApp('setup');
+}
+
+function closeLockSettings() {
+  lockSettingsOverlay.style.display = 'none';
+  ipcRenderer.send('set-browserview-visibility', true);
+}
+
 function openLockSettings() {
-  const ls = lockSettings;
-  lsToggle.classList.toggle('on', ls.enabled);
-  lsTimeout.value = String(ls.timeout || 5);
-  lsChangePin.style.display = ls.enabled ? 'block' : 'none';
-  lsRemovePin.style.display = ls.enabled ? 'block' : 'none';
+  syncLockSettingsControls();
+  lsTimeout.value = String(lockSettings.timeout || 5);
   lockSettingsOverlay.style.display = 'flex';
   ipcRenderer.send('set-browserview-visibility', false);
 }
@@ -740,14 +751,11 @@ lsToggle.onclick = () => {
   const ls = lockSettings;
   if (!ls.enabled) {
     // Enable: show setup PIN
-    lockSettingsOverlay.style.display = 'none';
-    lockApp('setup');
+    beginPinSetupFromSettings();
   } else {
     // Disable
     saveLockSettings({ enabled: false, hash: '' });
-    lsToggle.classList.remove('on');
-    lsChangePin.style.display = 'none';
-    lsRemovePin.style.display = 'none';
+    syncLockSettingsControls();
     resetIdleTimer();
   }
 };
@@ -758,24 +766,19 @@ lsTimeout.onchange = () => {
 };
 
 lsChangePin.onclick = () => {
-  lockSettingsOverlay.style.display = 'none';
-  lockApp('setup');
+  beginPinSetupFromSettings();
 };
 
 lsRemovePin.onclick = () => {
   if (confirm('Xoá mã PIN? Khoá ứng dụng sẽ bị tắt.')) {
     saveLockSettings({ enabled: false, hash: '' });
-    lockSettingsOverlay.style.display = 'none';
-    ipcRenderer.send('set-browserview-visibility', true);
+    closeLockSettings();
     lsToggle.classList.remove('on');
     resetIdleTimer();
   }
 };
 
-document.getElementById('ls-close').onclick = () => {
-  lockSettingsOverlay.style.display = 'none';
-  ipcRenderer.send('set-browserview-visibility', true);
-};
+document.getElementById('ls-close').onclick = () => closeLockSettings();
 
 // ============================================================
 //  IDLE DETECTION — Auto-lock after timeout
@@ -816,21 +819,21 @@ const dlToast = document.getElementById('dl-toast');
 let downloads = []; // { id, filename, savePath, total, received, state, done }
 let dlPanelOpen = false;
 
+function setDownloadPanelOpen(open) {
+  dlPanelOpen = Boolean(open);
+  dlPanel.style.display = dlPanelOpen ? 'flex' : 'none';
+}
+
 // Toggle download panel
 document.getElementById('btn-download').onclick = () => {
-  dlPanelOpen = !dlPanelOpen;
-  dlPanel.style.display = dlPanelOpen ? 'flex' : 'none';
+  setDownloadPanelOpen(!dlPanelOpen);
 };
-document.getElementById('dl-close').onclick = () => {
-  dlPanelOpen = false;
-  dlPanel.style.display = 'none';
-};
+document.getElementById('dl-close').onclick = () => setDownloadPanelOpen(false);
 
 // Close panel when clicking outside
 document.addEventListener('click', (e) => {
   if (dlPanelOpen && !dlPanel.contains(e.target) && e.target.id !== 'btn-download' && !e.target.closest('#btn-download')) {
-    dlPanelOpen = false;
-    dlPanel.style.display = 'none';
+    setDownloadPanelOpen(false);
   }
 });
 
@@ -840,6 +843,10 @@ function formatBytes(bytes) {
   const sizes = ['B', 'KB', 'MB', 'GB'];
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+}
+
+function getDownloadPercent(download) {
+  return download.total > 0 ? Math.round((download.received / download.total) * 100) : 0;
 }
 
 function getFileTypeLabel(filename) {
@@ -884,7 +891,7 @@ function renderDownloads() {
     item.className = 'dl-item';
     item.id = `dl-item-${dl.id}`;
 
-    const pct = dl.total > 0 ? Math.round((dl.received / dl.total) * 100) : 0;
+    const pct = getDownloadPercent(dl);
     const iconClass = dl.done ? (dl.state === 'completed' ? 'dl-done' : 'dl-error') : '';
     const fileTypeLabel = getFileTypeLabel(dl.filename);
     const statusText = dl.done
@@ -947,8 +954,7 @@ ipcRenderer.on('download-started', (event, data) => {
   renderDownloads();
   // Auto-open panel & show toast
   if (!dlPanelOpen) {
-    dlPanelOpen = true;
-    dlPanel.style.display = 'flex';
+    setDownloadPanelOpen(true);
   }
   showDlToast('Bắt đầu tải: ', data.filename);
 });
@@ -961,7 +967,7 @@ ipcRenderer.on('download-progress', (event, data) => {
     dl.state = data.state;
     // Update progress bar directly for performance
     const fill = document.querySelector(`#dl-item-${dl.id} .dl-progress-fill`);
-    const pct = dl.total > 0 ? Math.round((dl.received / dl.total) * 100) : 0;
+    const pct = getDownloadPercent(dl);
     if (fill) {
       fill.style.width = pct + '%';
       const metaSpans = document.querySelectorAll(`#dl-item-${dl.id} .dl-meta span`);
