@@ -99,9 +99,13 @@
     .service-btn {
       width: 34px; height: 34px; border-radius: 10px; border: 1px solid transparent;
       background: transparent; cursor: pointer; display: flex; align-items: center; justify-content: center;
-      font-size: 11px; font-weight: 700; letter-spacing: 0.02em; color: #b0b3b8;
+      color: #b0b3b8;
       margin-bottom: 2px; padding: 0; flex-shrink: 0; transition: all 0.15s ease;
     }
+    .service-btn .service-icon { display: block; width: 18px; height: 18px; object-fit: contain; flex-shrink: 0; }
+    .service-btn .service-icon-light { display: none; }
+    body.light-mode .service-btn .service-icon-dark { display: none; }
+    body.light-mode .service-btn .service-icon-light { display: block; }
     body.light-mode .service-btn { color: #65676b; }
     .service-btn:hover { background: rgba(255,255,255,0.08); color: #e4e6eb; }
     body.light-mode .service-btn:hover { background: rgba(0,0,0,0.04); color: #050505; }
@@ -515,8 +519,8 @@
   
   <!-- RIGHT SIDEBAR: Tools -->
   <div id="sidebar-right">
-    <button class="service-btn active" id="btn-service-messenger" type="button" title="Messenger" aria-label="Messenger" aria-pressed="true">M</button>
-    <button class="service-btn service-discord" id="btn-service-discord" type="button" title="Discord" aria-label="Discord" aria-pressed="false">D</button>
+    <button class="service-btn active" id="btn-service-messenger" type="button" title="Messenger" aria-label="Messenger" aria-pressed="true"><img class="service-icon service-icon-dark" src="assets/service-icons/messenger-dark.svg" alt="" aria-hidden="true"><img class="service-icon service-icon-light" src="assets/service-icons/messenger-light.svg" alt="" aria-hidden="true"></button>
+    <button class="service-btn service-discord" id="btn-service-discord" type="button" title="Discord" aria-label="Discord" aria-pressed="false"><img class="service-icon service-icon-dark" src="assets/service-icons/discord-dark.svg" alt="" aria-hidden="true"><img class="service-icon service-icon-light" src="assets/service-icons/discord-light.svg" alt="" aria-hidden="true"></button>
     <div class="tool-separator"></div>
 
     <button class="tool-btn" id="btn-home" title="Trang chủ">

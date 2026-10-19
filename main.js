@@ -157,6 +157,7 @@ let privacyScriptIdentifiers = new Map(); // webContents.id -> CDP script identi
 let privacyProtectedContents = new Map(); // webContents.id -> Messenger WebContents
 let privacyOperationQueues = new Map(); // webContents.id -> Promise
 let activeProfileId = null;
+let browserViewVisible = true;
 let profileSleepTimers = new Map();
 let updateTrayState = {
   available: false,
@@ -433,7 +434,7 @@ async function clearAppCache(clearSessionData = false) {
       if (activePartition && mainWindow && !mainWindow.isDestroyed()) {
         const service = normalizeService(profileServices[activeProfileId] || settings.activeService);
         const view = await createProfileBrowserView(activeProfileId, activePartition, service);
-        mainWindow.setBrowserView(view);
+        if (browserViewVisible) mainWindow.setBrowserView(view);
         updateBrowserViewBounds();
         updateMessengerAwayMode();
       }
@@ -1448,7 +1449,7 @@ function closeUpdateProgress() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   mainWindow.setProgressBar(-1);
   mainWindow.webContents.send('update-progress-state', { visible: false });
-  if (activeProfileId && browserViews[activeProfileId]) {
+  if (browserViewVisible && activeProfileId && browserViews[activeProfileId]) {
     mainWindow.setBrowserView(browserViews[activeProfileId]);
     updateBrowserViewBounds();
     updateMessengerAwayMode();
@@ -2095,6 +2096,7 @@ function createWindow() {
     if (!browserViews[profile.id]) {
       await createProfileBrowserView(profile.id, profile.partition, service);
     }
+    if (!browserViewVisible) return;
     mainWindow.setBrowserView(browserViews[profile.id]);
     updateBrowserViewBounds();
     updateMessengerAwayMode();
@@ -2197,7 +2199,7 @@ function createWindow() {
 
       // 4. Hiển thị lại
       if (activeProfileId === id) {
-        mainWindow.setBrowserView(view);
+        if (browserViewVisible) mainWindow.setBrowserView(view);
         updateBrowserViewBounds();
         updateMessengerAwayMode();
       }
@@ -2218,6 +2220,7 @@ function createWindow() {
   });
 
   ipcMain.on('set-browserview-visibility', (event, visible) => {
+    browserViewVisible = visible === true;
     if (!mainWindow) return;
     if (visible && activeProfileId && browserViews[activeProfileId]) {
       mainWindow.setBrowserView(browserViews[activeProfileId]);

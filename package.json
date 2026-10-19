@@ -1,14 +1,15 @@
 {
   "name": "messenger",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "description": "Messenger + Discord multi-account desktop for Windows (Electron/Chromium)",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "test": "npm run test:privacy && npm run test:service && npm run test:settings-update",
+    "test": "npm run test:privacy && npm run test:service && npm run test:service-icons && npm run test:settings-update",
     "test:privacy": "node scripts/testPrivacy.js",
     "test:privacy:cdp": "electron scripts/testPrivacyCdp.js",
     "test:service": "node scripts/testServiceModel.js",
+    "test:service-icons": "node scripts/testServiceSwitchIcons.js",
     "test:settings-update": "node scripts/testSettingsUpdateAction.js",
     "test:update-ui": "electron scripts/testUpdateProgressUi.js",
     "build": "electron-builder --win",
@@ -63,6 +64,7 @@
       "custom_style.css",
       "icon.ico",
       "icon.png",
+      "assets/service-icons/*.svg",
       "package.json"
     ],
     "publish": [
